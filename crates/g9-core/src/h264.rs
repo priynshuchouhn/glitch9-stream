@@ -17,7 +17,6 @@ pub const NAL_IDR: u8 = 5;
 /// Returns slices WITHOUT the start code.
 pub fn iter_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
     let mut nals = Vec::new();
-    let mut i = 0;
     let n = data.len();
     // Find first start code.
     let mut start = find_start_code(data, 0);
@@ -33,8 +32,7 @@ pub fn iter_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
             nals.push(&data[nal_start..nal_end]);
         }
         start = next;
-        i = nal_end;
-        if i >= n {
+        if nal_end >= n {
             break;
         }
     }
