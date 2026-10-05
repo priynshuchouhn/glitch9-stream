@@ -54,6 +54,22 @@ impl NvencEncoder {
                 .ok_or_else(|| Error::encode("NvEncodeAPICreateInstance not found"))?;
             let create: PFN_NvEncodeAPICreateInstance = std::mem::transmute(create);
 
+            // Diagnostic: struct sizes + computed versions, to compare against the
+            // SDK header's expected values when debugging INVALID_VERSION.
+            tracing::info!(
+                target: "g9::nvenc",
+                "ffi sizes: FUNCTION_LIST={} LOCK_BITSTREAM={} PIC_PARAMS={} CONFIG={} INIT={} ; \
+                 ver: lock={:#x} pic={:#x} api={:#x}",
+                std::mem::size_of::<NV_ENCODE_API_FUNCTION_LIST>(),
+                std::mem::size_of::<NV_ENC_LOCK_BITSTREAM>(),
+                std::mem::size_of::<NV_ENC_PIC_PARAMS>(),
+                std::mem::size_of::<NV_ENC_CONFIG>(),
+                std::mem::size_of::<NV_ENC_INITIALIZE_PARAMS>(),
+                struct_version_rt(2) | (1 << 31),
+                struct_version_rt(6) | (1 << 31),
+                api_version(),
+            );
+
             // 2) Fill the function list.
             let mut api: Box<NV_ENCODE_API_FUNCTION_LIST> = Box::new(std::mem::zeroed());
             api.version = struct_version_rt(2);
