@@ -237,7 +237,7 @@ impl NvencEncoder {
 
             // Lock the bitstream and copy out the encoded access unit.
             let mut lock = std::mem::zeroed::<NV_ENC_LOCK_BITSTREAM>();
-            lock.version = struct_version_rt(2);
+            lock.version = struct_version_rt(2) | (1 << 31);
             lock.outputBitstream = self.bitstream;
             let st = (self.api.nvEncLockBitstream.unwrap())(self.encoder, &mut lock);
             if st != NV_ENC_SUCCESS {

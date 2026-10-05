@@ -304,11 +304,11 @@ pub struct NV_ENC_PIC_PARAMS {
     pub reserved2: [*mut c_void; 64],
 }
 
-/// `NV_ENC_LOCK_BITSTREAM`
+/// `NV_ENC_LOCK_BITSTREAM` — field order/sizes match nvEncodeAPI.h exactly.
 #[repr(C)]
 pub struct NV_ENC_LOCK_BITSTREAM {
     pub version: u32,
-    pub bitfields: u32, // doNotWait:1, ltrFrame:1, getRCStats:1, reserved:29
+    pub bitfields: u32, // doNotWait:1, ltrFrame:1, getRCStats:1, reservedBitFields:29
     pub outputBitstream: *mut c_void,
     pub sliceOffsets: *mut u32,
     pub frameIdx: u32,
@@ -318,10 +318,25 @@ pub struct NV_ENC_LOCK_BITSTREAM {
     pub outputTimeStamp: u64,
     pub outputDuration: u64,
     pub bitstreamBufferPtr: *mut c_void, // out: pointer to the encoded data
-    pub pictureType: c_int,              // out
+    pub pictureType: c_int,              // out (NV_ENC_PIC_TYPE)
     pub pictureStruct: NV_ENC_PIC_STRUCT,
-    pub reserved: [u32; 219],
-    pub reserved2: [*mut c_void; 64],
+    pub frameAvgQP: u32,
+    pub frameSatd: u32,
+    pub ltrFrameIdx: u32,
+    pub ltrFrameBitmap: u32,
+    pub temporalId: u32,
+    pub intraMBCount: u32,
+    pub interMBCount: u32,
+    pub averageMVX: i32,
+    pub averageMVY: i32,
+    pub alphaLayerSizeInBytes: u32,
+    pub outputStatsPtrSize: u32,
+    pub reserved: u32,
+    pub outputStatsPtr: *mut c_void,
+    pub frameIdxDisplay: u32,
+    pub reserved1: [u32; 219],
+    pub reserved2: [*mut c_void; 63],
+    pub reservedInternal: [u32; 8],
 }
 
 /// The NVENC function-pointer table (`NV_ENCODE_API_FUNCTION_LIST`). We only type
