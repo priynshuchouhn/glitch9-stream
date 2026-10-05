@@ -1,0 +1,20 @@
+[package]
+name = "g9-encode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+g9-capture = { path = "../g9-capture" }
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+# NVENC is reached via raw FFI to nvEncodeAPI (NVIDIA Video Codec SDK). The input
+# surfaces are ID3D11Texture2D, so we also need the Windows D3D11 types.
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[build-dependencies]
+# On Windows the build script locates the NVIDIA Video Codec SDK headers/lib.

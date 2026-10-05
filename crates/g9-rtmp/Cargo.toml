@@ -1,0 +1,18 @@
+[package]
+name = "g9-rtmp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

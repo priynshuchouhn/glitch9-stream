@@ -1,0 +1,13 @@
+[package]
+name = "g9-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true

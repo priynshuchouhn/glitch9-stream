@@ -1,0 +1,17 @@
+# Rust build output
+/target
+**/target
+
+# Benchmark output
+/bench-results
+
+# Secrets — never commit stream keys or env files
+.env
+*.key
+*.pem
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

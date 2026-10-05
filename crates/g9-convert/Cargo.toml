@@ -1,0 +1,14 @@
+[package]
+name = "g9-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+g9-capture = { path = "../g9-capture" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

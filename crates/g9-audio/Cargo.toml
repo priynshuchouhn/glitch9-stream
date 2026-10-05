@@ -1,0 +1,18 @@
+[package]
+name = "g9-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+# WASAPI capture + Media Foundation AAC encoder are Windows-only.
+# libopus (audiopus) is also gated to Windows so the native libopus build (which
+# needs autotools) isn't required just to type-check the engine on a dev host.
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+audiopus.workspace = true

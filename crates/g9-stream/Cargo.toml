@@ -1,0 +1,26 @@
+[package]
+name = "g9-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "glitch9-stream"
+path = "src/main.rs"
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+g9-capture = { path = "../g9-capture" }
+g9-convert = { path = "../g9-convert" }
+g9-encode = { path = "../g9-encode" }
+g9-audio = { path = "../g9-audio" }
+g9-webrtc = { path = "../g9-webrtc" }
+g9-rtmp = { path = "../g9-rtmp" }
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true

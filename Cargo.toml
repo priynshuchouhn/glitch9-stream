@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/g9-core",
+    "crates/g9-capture",
+    "crates/g9-convert",
+    "crates/g9-encode",
+    "crates/g9-audio",
+    "crates/g9-webrtc",
+    "crates/g9-rtmp",
+    "crates/g9-stream",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "proprietary"
+authors = ["Glitch9"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+# --- async / util (cross-platform) ---
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+bytes = "1.7"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+async-trait = "0.1"
+futures = "0.3"
+
+# --- transports ---
+webrtc = "0.11"
+rtp = "0.11"
+tokio-tungstenite = "0.23"
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"
+
+# --- audio ---
+# libopus binding; AAC comes from Windows Media Foundation via the `windows` crate.
+audiopus = "0.2"
+
+# --- Windows platform bindings (only pulled in by Windows-target crates) ---
+[workspace.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_System_LibraryLoader",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,15 @@
+[package]
+name = "g9-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+g9-core = { path = "../g9-core" }
+thiserror.workspace = true
+tracing.workspace = true
+
+# D3D11 / DXGI are Windows-only. On other hosts the crate still compiles (the
+# Windows code is behind `#[cfg(windows)]`) but capture is unavailable at runtime.
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

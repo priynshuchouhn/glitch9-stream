@@ -1,0 +1,72 @@
+name: windows-build
+
+# Builds the Glitch9 streaming engine on a Windows x86_64 runner (MSVC + Windows SDK
+# are preinstalled on windows-latest). Produces a downloadable artifact: the release
+# binary plus the browser viewer. The runner has NO NVIDIA GPU, so it compiles,
+# links, and runs the unit tests — but it cannot run the engine itself. First real
+# run happens on the Windows+NVIDIA VM.
+#
+# This workflow BUILDS ONLY. It does not deploy to any VM: deploying would require
+# putting production SSH credentials in CI and pushing to a live box automatically.
+# Download the artifact and copy it to the VM manually (see docs/RUN.md).
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "glitch9-stream/**"      # adjust if the crate lives at the repo root
+  workflow_dispatch: {}          # allow manual runs
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        # Set this to the directory that contains Cargo.toml.
+        # If glitch9-stream is the repo root, change to "." everywhere below.
+        working-directory: glitch9-stream
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install CMake + NASM (for aws-lc / libopus native builds)
+        shell: pwsh
+        run: |
+          choco install cmake nasm --no-progress -y
+          echo "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\Program Files\NASM"      | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: glitch9-stream
+
+      - name: Build (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Unit tests (protocol/bitstream logic — host-independent)
+        run: cargo test --release --target x86_64-pc-windows-msvc
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\glitch9-stream.exe" dist\
+          Copy-Item -Recurse "web" dist\web
+          Copy-Item -Recurse "docs" dist\docs
+          Copy-Item -Recurse "scripts" dist\scripts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glitch9-stream-windows-x64
+          path: glitch9-stream/dist
+          if-no-files-found: error
+          retention-days: 14
