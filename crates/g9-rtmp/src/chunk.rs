@@ -32,6 +32,7 @@ impl ChunkWriter {
         Self { chunk_size: 128 } // RTMP default until we send Set Chunk Size
     }
 
+    #[allow(dead_code)] // used by tests; kept as part of the ChunkWriter API
     pub fn set_chunk_size(&mut self, size: usize) {
         self.chunk_size = size;
     }

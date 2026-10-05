@@ -45,10 +45,6 @@ pub struct RtmpTransport {
     dropped: Arc<AtomicU64>,
 }
 
-fn s2u(s: TransportState) -> u8 {
-    s as u8
-}
-
 impl RtmpTransport {
     pub fn new(name: impl Into<String>, cfg: RtmpConfig) -> Self {
         let (tx, rx) = mpsc::channel(VIDEO_QUEUE_DEPTH + AUDIO_QUEUE_DEPTH);

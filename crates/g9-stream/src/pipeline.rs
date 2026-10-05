@@ -199,7 +199,10 @@ fn audio_loop(
 static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Snapshot of the fields the video thread needs (so we don't move the whole config).
+/// fps/bitrate are carried for completeness/logging; the active values live in the
+/// per-output EncoderProfiles built in `run()`.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct VideoThreadCfg {
     pub display_index: u32,
     pub width: u32,
