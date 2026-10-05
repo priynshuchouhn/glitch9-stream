@@ -330,6 +330,11 @@ pub struct NV_ENC_LOCK_BITSTREAM {
 // non-null fn pointers; wrapping in Option makes the all-zero bit pattern valid
 // (= None), so `mem::zeroed()` on this struct is sound. `NvEncodeAPICreateInstance`
 // fills them in. Call sites use `(self.api.field.unwrap())(...)`.
+// Field order and count match nvEncodeAPI.h EXACTLY — the table is populated by
+// NvEncodeAPICreateInstance, so any misordering makes a call land on the wrong
+// pointer (symptom: NV_ENC_ERR_INVALID_VERSION / status 15 at OpenEncodeSessionEx).
+// Entries we don't call are left as `*mut c_void` placeholders of the right size.
+// Final padding is reserved2[275], per the header.
 #[repr(C)]
 pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub version: u32,
@@ -345,15 +350,6 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncGetEncodePresetCount: *mut c_void,
     pub nvEncGetEncodePresetGUIDs: *mut c_void,
     pub nvEncGetEncodePresetConfig: *mut c_void,
-    pub nvEncGetEncodePresetConfigEx: Option<
-        extern "C" fn(
-            *mut c_void,
-            GUID,
-            GUID,
-            NV_ENC_TUNING_INFO,
-            *mut NV_ENC_PRESET_CONFIG,
-        ) -> NVENCSTATUS,
-    >,
     pub nvEncInitializeEncoder:
         Option<extern "C" fn(*mut c_void, *mut NV_ENC_INITIALIZE_PARAMS) -> NVENCSTATUS>,
     pub nvEncCreateInputBuffer: *mut c_void,
@@ -388,8 +384,26 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
         Option<extern "C" fn(*mut c_void, *mut NV_ENC_REGISTER_RESOURCE) -> NVENCSTATUS>,
     pub nvEncUnregisterResource: Option<extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS>,
     pub nvEncReconfigureEncoder: *mut c_void,
-    // remaining entries omitted (kept as trailing reserved pointers)
-    pub reserved_tail: [*mut c_void; 281],
+    pub reserved1: *mut c_void,
+    pub nvEncCreateMVBuffer: *mut c_void,
+    pub nvEncDestroyMVBuffer: *mut c_void,
+    pub nvEncRunMotionEstimationOnly: *mut c_void,
+    pub nvEncGetLastErrorString: *mut c_void,
+    pub nvEncSetIOCudaStreams: *mut c_void,
+    // GetEncodePresetConfigEx lives HERE, near the end — not next to PresetConfig.
+    pub nvEncGetEncodePresetConfigEx: Option<
+        extern "C" fn(
+            *mut c_void,
+            GUID,
+            GUID,
+            NV_ENC_TUNING_INFO,
+            *mut NV_ENC_PRESET_CONFIG,
+        ) -> NVENCSTATUS,
+    >,
+    pub nvEncGetSequenceParamEx: *mut c_void,
+    pub nvEncRestoreEncoderState: *mut c_void,
+    pub nvEncLookaheadPicture: *mut c_void,
+    pub reserved2: [*mut c_void; 275],
 }
 
 pub const NV_ENCODE_API_FUNCTION_LIST_VER: u32 = struct_version(2);
