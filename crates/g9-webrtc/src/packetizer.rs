@@ -7,6 +7,12 @@
 //! SPS/PPS are sent as their own single-NAL packets ahead of an IDR so a late
 //! viewer can decode. This module produces payload byte-vectors; webrtc-rs owns the
 //! RTP header, SSRC, sequence numbers and SRTP encryption.
+//!
+//! Note: the production WebRTC path delegates RFC 6184 payloading to webrtc-rs'
+//! `TrackLocalStaticSample`, so these functions aren't on the hot path today. They
+//! are kept and unit-tested as a self-contained, verified reference packetizer (and
+//! for a future manual-RTP `TrackLocalStaticRTP` path), hence the allow below.
+#![allow(dead_code)]
 
 use g9_core::h264::{iter_annexb_nals, nal_type, NAL_IDR};
 

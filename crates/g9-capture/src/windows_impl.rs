@@ -51,6 +51,10 @@ impl D3DContext {
     pub fn context(&self) -> &ID3D11DeviceContext {
         &self.context
     }
+    /// Negotiated D3D feature level (for the startup GPU log).
+    pub fn feature_level(&self) -> D3D_FEATURE_LEVEL {
+        self.feature_level
+    }
 
     /// Create a device, preferring an NVIDIA adapter (vendor id 0x10DE). If
     /// `preferred_adapter` is given, use that index instead.

@@ -13,6 +13,7 @@ pub const MSG_SET_CHUNK_SIZE: u8 = 1;
 pub const MSG_AMF0_COMMAND: u8 = 20;
 pub const MSG_AUDIO: u8 = 8;
 pub const MSG_VIDEO: u8 = 9;
+#[allow(dead_code)] // onMetaData path (not sent in the POC; kept for completeness)
 pub const MSG_DATA_AMF0: u8 = 18;
 
 /// Chunk stream ids (arbitrary but conventional).

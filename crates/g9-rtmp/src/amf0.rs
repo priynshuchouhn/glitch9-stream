@@ -7,6 +7,7 @@
 use bytes::{BufMut, BytesMut};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Boolean/other variants are part of the complete AMF0 type set
 pub enum Amf0 {
     Number(f64),
     Boolean(bool),
