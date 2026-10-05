@@ -56,7 +56,7 @@ impl NvencEncoder {
 
             // 2) Fill the function list.
             let mut api: Box<NV_ENCODE_API_FUNCTION_LIST> = Box::new(std::mem::zeroed());
-            api.version = NV_ENCODE_API_FUNCTION_LIST_VER;
+            api.version = struct_version_rt(2);
             let st = create(api.as_mut() as *mut _);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!(
@@ -67,10 +67,10 @@ impl NvencEncoder {
             // 3) Open an encode session over the D3D11 device.
             let mut session: *mut c_void = std::ptr::null_mut();
             let mut open = std::mem::zeroed::<NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS>();
-            open.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+            open.version = struct_version_rt(1);
             open.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
             open.device = ctx.device().as_raw();
-            open.apiVersion = NVENCAPI_VERSION;
+            open.apiVersion = api_version();
             let st = (api.nvEncOpenEncodeSessionEx.unwrap())(&mut open, &mut session);
             if st != NV_ENC_SUCCESS || session.is_null() {
                 return Err(Error::encode(format!(
@@ -89,8 +89,8 @@ impl NvencEncoder {
                 _ => NV_ENC_TUNING_INFO_LOW_LATENCY,
             };
             let mut preset_cfg = std::mem::zeroed::<NV_ENC_PRESET_CONFIG>();
-            preset_cfg.version = NV_ENC_PRESET_CONFIG_VER;
-            preset_cfg.presetCfg.version = NV_ENC_CONFIG_VER;
+            preset_cfg.version = struct_version_rt(4) | (1 << 31);
+            preset_cfg.presetCfg.version = struct_version_rt(7) | (1 << 31);
             let st = (api.nvEncGetEncodePresetConfigEx.unwrap())(
                 session,
                 NV_ENC_CODEC_H264_GUID,
@@ -106,11 +106,11 @@ impl NvencEncoder {
 
             // 5) Override rate control (CBR), GOP and B-frames from the profile.
             let mut config = preset_cfg.presetCfg;
-            config.version = NV_ENC_CONFIG_VER;
+            config.version = struct_version_rt(7) | (1 << 31);
             config.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
             config.gopLength = profile.gop_frames;
             config.frameIntervalP = (profile.b_frames as i32) + 1; // P-frame interval
-            config.rcParams.version = NV_ENC_RC_PARAMS_VER;
+            config.rcParams.version = struct_version_rt(1);
             config.rcParams.rateControlMode = match profile.rate_control {
                 RateControl::Cbr => NV_ENC_PARAMS_RC_CBR,
                 RateControl::VbrCapped => NV_ENC_PARAMS_RC_VBR,
@@ -124,7 +124,7 @@ impl NvencEncoder {
 
             // 6) Initialize the encoder.
             let mut init = std::mem::zeroed::<NV_ENC_INITIALIZE_PARAMS>();
-            init.version = NV_ENC_INITIALIZE_PARAMS_VER;
+            init.version = struct_version_rt(5);
             init.encodeGUID = NV_ENC_CODEC_H264_GUID;
             init.presetGUID = preset_guid;
             init.encodeWidth = profile.width;
@@ -145,7 +145,7 @@ impl NvencEncoder {
 
             // 7) Create an output bitstream buffer.
             let mut bb = std::mem::zeroed::<NV_ENC_CREATE_BITSTREAM_BUFFER>();
-            bb.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            bb.version = struct_version_rt(1);
             let st = (api.nvEncCreateBitstreamBuffer.unwrap())(session, &mut bb);
             if st != NV_ENC_SUCCESS || bb.bitstreamBuffer.is_null() {
                 return Err(Error::encode(format!(
@@ -186,7 +186,7 @@ impl NvencEncoder {
             // each call here for clarity — the converter reuses one texture, so a real
             // optimization is to register once and cache. Kept simple + correct.)
             let mut reg = std::mem::zeroed::<NV_ENC_REGISTER_RESOURCE>();
-            reg.version = NV_ENC_REGISTER_RESOURCE_VER;
+            reg.version = struct_version_rt(3);
             reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
             reg.width = self.width;
             reg.height = self.height;
@@ -199,7 +199,7 @@ impl NvencEncoder {
 
             // Map it to get an input buffer handle.
             let mut map = std::mem::zeroed::<NV_ENC_MAP_INPUT_RESOURCE>();
-            map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+            map.version = struct_version_rt(4);
             map.registeredResource = reg.registeredResource;
             let st = (self.api.nvEncMapInputResource.unwrap())(self.encoder, &mut map);
             if st != NV_ENC_SUCCESS {
@@ -211,7 +211,7 @@ impl NvencEncoder {
 
             // Submit the frame.
             let mut pic = std::mem::zeroed::<NV_ENC_PIC_PARAMS>();
-            pic.version = NV_ENC_PIC_PARAMS_VER;
+            pic.version = struct_version_rt(6) | (1 << 31);
             pic.inputWidth = self.width;
             pic.inputHeight = self.height;
             pic.inputBuffer = map.mappedResource;
@@ -237,7 +237,7 @@ impl NvencEncoder {
 
             // Lock the bitstream and copy out the encoded access unit.
             let mut lock = std::mem::zeroed::<NV_ENC_LOCK_BITSTREAM>();
-            lock.version = NV_ENC_LOCK_BITSTREAM_VER;
+            lock.version = struct_version_rt(2);
             lock.outputBitstream = self.bitstream;
             let st = (self.api.nvEncLockBitstream.unwrap())(self.encoder, &mut lock);
             if st != NV_ENC_SUCCESS {

@@ -105,13 +105,42 @@ pub type NV_ENC_PARAMS_RC_MODE = c_int;
 pub const NV_ENC_PARAMS_RC_CBR: NV_ENC_PARAMS_RC_MODE = 0x2;
 pub const NV_ENC_PARAMS_RC_VBR: NV_ENC_PARAMS_RC_MODE = 0x4;
 
-/// Version packing macro equivalent: `NVENCAPI_STRUCT_VERSION(ver)`.
-/// NVENCAPI_VERSION = (12 | (2 << 24)) for SDK 12.x; structs OR in (ver<<16)|(0x7<<28).
-pub const NVENCAPI_MAJOR: u32 = 12;
-pub const NVENCAPI_MINOR: u32 = 2;
+/// Version packing, matching the SDK header:
+///   NVENCAPI_VERSION           = (MAJOR | (MINOR << 24))
+///   NVENCAPI_STRUCT_VERSION(v) = NVENCAPI_VERSION | (v << 16) | (0x7 << 28)
+///
+/// Blackwell drivers ship NVENC SDK 13.x and reject the older 12.x apiVersion with
+/// NV_ENC_ERR_INVALID_VERSION (15) at OpenEncodeSessionEx. We therefore target 13.0.
+/// The SDK major/minor can be overridden at runtime via the G9_NVENC_MAJOR /
+/// G9_NVENC_MINOR env vars if a given driver needs a different value — see
+/// `api_version()`.
+pub const NVENCAPI_MAJOR: u32 = 13;
+pub const NVENCAPI_MINOR: u32 = 0;
+
+/// Compile-time default API version (13.0).
 pub const NVENCAPI_VERSION: u32 = NVENCAPI_MAJOR | (NVENCAPI_MINOR << 24);
+
+/// Runtime-resolved API version, allowing an env override without a rebuild. This is
+/// invaluable for matching whatever SDK the installed driver expects.
+pub fn api_version() -> u32 {
+    let major = std::env::var("G9_NVENC_MAJOR")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(NVENCAPI_MAJOR);
+    let minor = std::env::var("G9_NVENC_MINOR")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(NVENCAPI_MINOR);
+    major | (minor << 24)
+}
+
 pub const fn struct_version(ver: u32) -> u32 {
     NVENCAPI_VERSION | (ver << 16) | (0x7 << 28)
+}
+
+/// Runtime struct-version using the env-overridable api_version().
+pub fn struct_version_rt(ver: u32) -> u32 {
+    api_version() | (ver << 16) | (0x7 << 28)
 }
 
 /// `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`
