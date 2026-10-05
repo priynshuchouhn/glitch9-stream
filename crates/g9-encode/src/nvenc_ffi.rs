@@ -79,9 +79,10 @@ pub const NV_ENC_TUNING_INFO_LOW_LATENCY: NV_ENC_TUNING_INFO = 2;
 pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: NV_ENC_TUNING_INFO = 3;
 pub const NV_ENC_TUNING_INFO_LOSSLESS: NV_ENC_TUNING_INFO = 4;
 
-// --- Device type ---
+// --- Device type --- (per nvEncodeAPI.h: DIRECTX=0, CUDA=1, OPENGL=2)
 pub type NV_ENC_DEVICE_TYPE = c_int;
-pub const NV_ENC_DEVICE_TYPE_DIRECTX: NV_ENC_DEVICE_TYPE = 1;
+pub const NV_ENC_DEVICE_TYPE_DIRECTX: NV_ENC_DEVICE_TYPE = 0;
+pub const NV_ENC_DEVICE_TYPE_CUDA: NV_ENC_DEVICE_TYPE = 1;
 
 // --- Buffer format ---
 pub type NV_ENC_BUFFER_FORMAT = c_int;
