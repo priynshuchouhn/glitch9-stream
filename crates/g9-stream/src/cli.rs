@@ -32,8 +32,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 8_000_000)]
     pub bitrate: u32,
 
-    /// Capture + stream audio.
-    #[arg(long, default_value_t = true)]
+    /// Capture + stream audio. Accepts `--audio true` / `--audio false`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub audio: bool,
 
     /// RTMP(S) ingest URL (no stream key in the URL). Reusable: YouTube/Twitch/custom.
