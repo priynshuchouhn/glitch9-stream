@@ -26,8 +26,10 @@ pub struct NvencEncoder {
     _dll: HMODULE,
     api: Box<NV_ENCODE_API_FUNCTION_LIST>,
     encoder: *mut c_void,
+    #[allow(dead_code)] // reserved for register-once optimization (see POC report)
     registered_resource: *mut c_void,
     bitstream: *mut c_void,
+    #[allow(dead_code)] // kept for reconfigure/debug
     profile: EncoderProfile,
     clock: PtsClock,
     frame_index: u32,
@@ -69,7 +71,7 @@ impl NvencEncoder {
             open.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
             open.device = ctx.device().as_raw();
             open.apiVersion = NVENCAPI_VERSION;
-            let st = (api.nvEncOpenEncodeSessionEx)(&mut open, &mut session);
+            let st = (api.nvEncOpenEncodeSessionEx.unwrap())(&mut open, &mut session);
             if st != NV_ENC_SUCCESS || session.is_null() {
                 return Err(Error::encode(format!(
                     "failed to open encode session. NvencStatus: {st}"
@@ -89,7 +91,7 @@ impl NvencEncoder {
             let mut preset_cfg = std::mem::zeroed::<NV_ENC_PRESET_CONFIG>();
             preset_cfg.version = NV_ENC_PRESET_CONFIG_VER;
             preset_cfg.presetCfg.version = NV_ENC_CONFIG_VER;
-            let st = (api.nvEncGetEncodePresetConfigEx)(
+            let st = (api.nvEncGetEncodePresetConfigEx.unwrap())(
                 session,
                 NV_ENC_CODEC_H264_GUID,
                 preset_guid,
@@ -134,7 +136,7 @@ impl NvencEncoder {
             init.enablePTD = 1; // picture-type decision by NVENC
             init.tuningInfo = tuning;
             init.encodeConfig = &mut config;
-            let st = (api.nvEncInitializeEncoder)(session, &mut init);
+            let st = (api.nvEncInitializeEncoder.unwrap())(session, &mut init);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!(
                     "nvEncInitializeEncoder failed: status {st}"
@@ -144,7 +146,7 @@ impl NvencEncoder {
             // 7) Create an output bitstream buffer.
             let mut bb = std::mem::zeroed::<NV_ENC_CREATE_BITSTREAM_BUFFER>();
             bb.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-            let st = (api.nvEncCreateBitstreamBuffer)(session, &mut bb);
+            let st = (api.nvEncCreateBitstreamBuffer.unwrap())(session, &mut bb);
             if st != NV_ENC_SUCCESS || bb.bitstreamBuffer.is_null() {
                 return Err(Error::encode(format!(
                     "nvEncCreateBitstreamBuffer failed: status {st}"
@@ -190,7 +192,7 @@ impl NvencEncoder {
             reg.height = self.height;
             reg.resourceToRegister = tex.as_raw();
             reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
-            let st = (self.api.nvEncRegisterResource)(self.encoder, &mut reg);
+            let st = (self.api.nvEncRegisterResource.unwrap())(self.encoder, &mut reg);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!("nvEncRegisterResource: status {st}")));
             }
@@ -199,9 +201,9 @@ impl NvencEncoder {
             let mut map = std::mem::zeroed::<NV_ENC_MAP_INPUT_RESOURCE>();
             map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
             map.registeredResource = reg.registeredResource;
-            let st = (self.api.nvEncMapInputResource)(self.encoder, &mut map);
+            let st = (self.api.nvEncMapInputResource.unwrap())(self.encoder, &mut map);
             if st != NV_ENC_SUCCESS {
-                let _ = (self.api.nvEncUnregisterResource)(self.encoder, reg.registeredResource);
+                let _ = (self.api.nvEncUnregisterResource.unwrap())(self.encoder, reg.registeredResource);
                 return Err(Error::encode(format!("nvEncMapInputResource: status {st}")));
             }
 
@@ -223,10 +225,10 @@ impl NvencEncoder {
                 self.force_idr = false;
             }
 
-            let st = (self.api.nvEncEncodePicture)(self.encoder, &mut pic);
+            let st = (self.api.nvEncEncodePicture.unwrap())(self.encoder, &mut pic);
             // Unmap+unregister regardless of encode result.
-            let _ = (self.api.nvEncUnmapInputResource)(self.encoder, map.mappedResource);
-            let _ = (self.api.nvEncUnregisterResource)(self.encoder, reg.registeredResource);
+            let _ = (self.api.nvEncUnmapInputResource.unwrap())(self.encoder, map.mappedResource);
+            let _ = (self.api.nvEncUnregisterResource.unwrap())(self.encoder, reg.registeredResource);
 
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!("nvEncEncodePicture: status {st}")));
@@ -237,7 +239,7 @@ impl NvencEncoder {
             let mut lock = std::mem::zeroed::<NV_ENC_LOCK_BITSTREAM>();
             lock.version = NV_ENC_LOCK_BITSTREAM_VER;
             lock.outputBitstream = self.bitstream;
-            let st = (self.api.nvEncLockBitstream)(self.encoder, &mut lock);
+            let st = (self.api.nvEncLockBitstream.unwrap())(self.encoder, &mut lock);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!("nvEncLockBitstream: status {st}")));
             }
@@ -247,7 +249,7 @@ impl NvencEncoder {
                 lock.bitstreamSizeInBytes as usize,
             );
             let annexb = bytes::Bytes::copy_from_slice(data);
-            let _ = (self.api.nvEncUnlockBitstream)(self.encoder, self.bitstream);
+            let _ = (self.api.nvEncUnlockBitstream.unwrap())(self.encoder, self.bitstream);
 
             // Classify + extract SPS/PPS on keyframes.
             let is_key = contains_idr(&annexb);
@@ -274,10 +276,14 @@ impl Drop for NvencEncoder {
     fn drop(&mut self) {
         unsafe {
             if !self.bitstream.is_null() {
-                let _ = (self.api.nvEncDestroyBitstreamBuffer)(self.encoder, self.bitstream);
+                if let Some(f) = self.api.nvEncDestroyBitstreamBuffer {
+                    let _ = f(self.encoder, self.bitstream);
+                }
             }
             if !self.encoder.is_null() {
-                let _ = (self.api.nvEncDestroyEncoder)(self.encoder);
+                if let Some(f) = self.api.nvEncDestroyEncoder {
+                    let _ = f(self.encoder);
+                }
             }
             let _ = FreeLibrary(self._dll);
         }

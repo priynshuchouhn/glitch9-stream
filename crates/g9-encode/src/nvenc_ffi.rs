@@ -296,6 +296,11 @@ pub struct NV_ENC_LOCK_BITSTREAM {
 
 /// The NVENC function-pointer table (`NV_ENCODE_API_FUNCTION_LIST`). We only type
 /// the entries we call; the rest are opaque pointers to preserve layout/order.
+//
+// IMPORTANT: every function-pointer field is `Option<extern "C" fn ...>`. These are
+// non-null fn pointers; wrapping in Option makes the all-zero bit pattern valid
+// (= None), so `mem::zeroed()` on this struct is sound. `NvEncodeAPICreateInstance`
+// fills them in. Call sites use `(self.api.field.unwrap())(...)`.
 #[repr(C)]
 pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub version: u32,
@@ -311,23 +316,28 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncGetEncodePresetCount: *mut c_void,
     pub nvEncGetEncodePresetGUIDs: *mut c_void,
     pub nvEncGetEncodePresetConfig: *mut c_void,
-    pub nvEncGetEncodePresetConfigEx: extern "C" fn(
-        *mut c_void,
-        GUID,
-        GUID,
-        NV_ENC_TUNING_INFO,
-        *mut NV_ENC_PRESET_CONFIG,
-    ) -> NVENCSTATUS,
+    pub nvEncGetEncodePresetConfigEx: Option<
+        extern "C" fn(
+            *mut c_void,
+            GUID,
+            GUID,
+            NV_ENC_TUNING_INFO,
+            *mut NV_ENC_PRESET_CONFIG,
+        ) -> NVENCSTATUS,
+    >,
     pub nvEncInitializeEncoder:
-        extern "C" fn(*mut c_void, *mut NV_ENC_INITIALIZE_PARAMS) -> NVENCSTATUS,
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_INITIALIZE_PARAMS) -> NVENCSTATUS>,
     pub nvEncCreateInputBuffer: *mut c_void,
     pub nvEncDestroyInputBuffer: *mut c_void,
     pub nvEncCreateBitstreamBuffer:
-        extern "C" fn(*mut c_void, *mut NV_ENC_CREATE_BITSTREAM_BUFFER) -> NVENCSTATUS,
-    pub nvEncDestroyBitstreamBuffer: extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS,
-    pub nvEncEncodePicture: extern "C" fn(*mut c_void, *mut NV_ENC_PIC_PARAMS) -> NVENCSTATUS,
-    pub nvEncLockBitstream: extern "C" fn(*mut c_void, *mut NV_ENC_LOCK_BITSTREAM) -> NVENCSTATUS,
-    pub nvEncUnlockBitstream: extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS,
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_CREATE_BITSTREAM_BUFFER) -> NVENCSTATUS>,
+    pub nvEncDestroyBitstreamBuffer:
+        Option<extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS>,
+    pub nvEncEncodePicture:
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_PIC_PARAMS) -> NVENCSTATUS>,
+    pub nvEncLockBitstream:
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_LOCK_BITSTREAM) -> NVENCSTATUS>,
+    pub nvEncUnlockBitstream: Option<extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS>,
     pub nvEncLockInputBuffer: *mut c_void,
     pub nvEncUnlockInputBuffer: *mut c_void,
     pub nvEncGetEncodeStats: *mut c_void,
@@ -335,17 +345,19 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncRegisterAsyncEvent: *mut c_void,
     pub nvEncUnregisterAsyncEvent: *mut c_void,
     pub nvEncMapInputResource:
-        extern "C" fn(*mut c_void, *mut NV_ENC_MAP_INPUT_RESOURCE) -> NVENCSTATUS,
-    pub nvEncUnmapInputResource: extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS,
-    pub nvEncDestroyEncoder: extern "C" fn(*mut c_void) -> NVENCSTATUS,
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_MAP_INPUT_RESOURCE) -> NVENCSTATUS>,
+    pub nvEncUnmapInputResource: Option<extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS>,
+    pub nvEncDestroyEncoder: Option<extern "C" fn(*mut c_void) -> NVENCSTATUS>,
     pub nvEncInvalidateRefFrames: *mut c_void,
-    pub nvEncOpenEncodeSessionEx: extern "C" fn(
-        *mut NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
-        *mut *mut c_void,
-    ) -> NVENCSTATUS,
+    pub nvEncOpenEncodeSessionEx: Option<
+        extern "C" fn(
+            *mut NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
+            *mut *mut c_void,
+        ) -> NVENCSTATUS,
+    >,
     pub nvEncRegisterResource:
-        extern "C" fn(*mut c_void, *mut NV_ENC_REGISTER_RESOURCE) -> NVENCSTATUS,
-    pub nvEncUnregisterResource: extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS,
+        Option<extern "C" fn(*mut c_void, *mut NV_ENC_REGISTER_RESOURCE) -> NVENCSTATUS>,
+    pub nvEncUnregisterResource: Option<extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS>,
     pub nvEncReconfigureEncoder: *mut c_void,
     // remaining entries omitted (kept as trailing reserved pointers)
     pub reserved_tail: [*mut c_void; 281],
