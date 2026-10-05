@@ -115,9 +115,7 @@ impl NvencEncoder {
                 &mut preset_cfg,
             );
             if st != NV_ENC_SUCCESS {
-                return Err(Error::encode(format!(
-                    "GetEncodePresetConfigEx failed: status {st}"
-                )));
+                return Err(Error::encode(format!("GetEncodePresetConfigEx: {} ({st})", status_name(st))));
             }
 
             // 5) Override rate control (CBR), GOP and B-frames from the profile.
@@ -154,9 +152,7 @@ impl NvencEncoder {
             init.encodeConfig = &mut config;
             let st = (api.nvEncInitializeEncoder.unwrap())(session, &mut init);
             if st != NV_ENC_SUCCESS {
-                return Err(Error::encode(format!(
-                    "nvEncInitializeEncoder failed: status {st}"
-                )));
+                return Err(Error::encode(format!("InitializeEncoder: {} ({st})", status_name(st))));
             }
 
             // 7) Create an output bitstream buffer.
@@ -164,9 +160,7 @@ impl NvencEncoder {
             bb.version = struct_version_rt(1);
             let st = (api.nvEncCreateBitstreamBuffer.unwrap())(session, &mut bb);
             if st != NV_ENC_SUCCESS || bb.bitstreamBuffer.is_null() {
-                return Err(Error::encode(format!(
-                    "nvEncCreateBitstreamBuffer failed: status {st}"
-                )));
+                return Err(Error::encode(format!("CreateBitstreamBuffer: {} ({st})", status_name(st))));
             }
 
             Ok(Self {
@@ -210,7 +204,7 @@ impl NvencEncoder {
             reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
             let st = (self.api.nvEncRegisterResource.unwrap())(self.encoder, &mut reg);
             if st != NV_ENC_SUCCESS {
-                return Err(Error::encode(format!("nvEncRegisterResource: status {st}")));
+                return Err(Error::encode(format!("RegisterResource: {} ({st})", status_name(st))));
             }
 
             // Map it to get an input buffer handle.
@@ -220,7 +214,7 @@ impl NvencEncoder {
             let st = (self.api.nvEncMapInputResource.unwrap())(self.encoder, &mut map);
             if st != NV_ENC_SUCCESS {
                 let _ = (self.api.nvEncUnregisterResource.unwrap())(self.encoder, reg.registeredResource);
-                return Err(Error::encode(format!("nvEncMapInputResource: status {st}")));
+                return Err(Error::encode(format!("MapInputResource: {} ({st})", status_name(st))));
             }
 
             let pts = self.clock.now();
@@ -246,10 +240,20 @@ impl NvencEncoder {
             let _ = (self.api.nvEncUnmapInputResource.unwrap())(self.encoder, map.mappedResource);
             let _ = (self.api.nvEncUnregisterResource.unwrap())(self.encoder, reg.registeredResource);
 
-            if st != NV_ENC_SUCCESS {
-                return Err(Error::encode(format!("nvEncEncodePicture: status {st}")));
-            }
             self.frame_index += 1;
+
+            // The encoder may buffer this frame (B-frame reordering / warm-up) and
+            // return NEED_MORE_INPUT. That is NOT an error and we must NOT lock the
+            // output yet — feed the next frame.
+            if st == NV_ENC_ERR_NEED_MORE_INPUT {
+                return Ok(None);
+            }
+            if st != NV_ENC_SUCCESS {
+                return Err(Error::encode(format!(
+                    "nvEncEncodePicture: {} ({st})",
+                    status_name(st)
+                )));
+            }
 
             // Lock the bitstream and copy out the encoded access unit.
             let mut lock = std::mem::zeroed::<NV_ENC_LOCK_BITSTREAM>();
@@ -257,7 +261,10 @@ impl NvencEncoder {
             lock.outputBitstream = self.bitstream;
             let st = (self.api.nvEncLockBitstream.unwrap())(self.encoder, &mut lock);
             if st != NV_ENC_SUCCESS {
-                return Err(Error::encode(format!("nvEncLockBitstream: status {st}")));
+                return Err(Error::encode(format!(
+                    "nvEncLockBitstream: {} ({st})",
+                    status_name(st)
+                )));
             }
 
             let data = std::slice::from_raw_parts(

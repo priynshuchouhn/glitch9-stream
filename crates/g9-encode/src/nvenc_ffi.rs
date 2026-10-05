@@ -20,6 +20,33 @@ use std::os::raw::{c_int, c_void};
 
 pub type NVENCSTATUS = c_int;
 pub const NV_ENC_SUCCESS: NVENCSTATUS = 0;
+pub const NV_ENC_ERR_NEED_MORE_INPUT: NVENCSTATUS = 20;
+
+/// Human-readable NVENC status name (the numeric codes are easy to misread).
+pub fn status_name(st: NVENCSTATUS) -> &'static str {
+    match st {
+        0 => "SUCCESS",
+        1 => "NO_ENCODE_DEVICE",
+        2 => "UNSUPPORTED_DEVICE",
+        3 => "INVALID_ENCODERDEVICE",
+        4 => "INVALID_DEVICE",
+        5 => "DEVICE_NOT_EXIST",
+        6 => "INVALID_PTR",
+        7 => "INVALID_EVENT",
+        8 => "INVALID_PARAM",
+        9 => "INVALID_CALL",
+        10 => "OUT_OF_MEMORY",
+        11 => "ENCODER_NOT_INITIALIZED",
+        12 => "UNSUPPORTED_PARAM",
+        13 => "LOCK_BUSY",
+        14 => "NOT_ENOUGH_BUFFER",
+        15 => "INVALID_VERSION",
+        16 => "MAP_FAILED",
+        20 => "NEED_MORE_INPUT",
+        21 => "ENCODER_BUSY",
+        _ => "UNKNOWN",
+    }
+}
 
 /// NVENC GUID (matches the SDK's `GUID`).
 #[repr(C)]
@@ -93,9 +120,10 @@ pub const NV_ENC_BUFFER_FORMAT_ARGB: NV_ENC_BUFFER_FORMAT = 0x1000000;
 pub type NV_ENC_INPUT_RESOURCE_TYPE = c_int;
 pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: NV_ENC_INPUT_RESOURCE_TYPE = 0;
 
-// --- Picture structure / flags ---
+// --- Picture structure / type / flags ---
 pub type NV_ENC_PIC_STRUCT = c_int;
 pub const NV_ENC_PIC_STRUCT_FRAME: NV_ENC_PIC_STRUCT = 1;
+pub type NV_ENC_PIC_TYPE = c_int;
 
 pub type NV_ENC_PIC_FLAGS = u32;
 pub const NV_ENC_PIC_FLAG_FORCEIDR: NV_ENC_PIC_FLAGS = 0x4;
@@ -282,7 +310,9 @@ pub struct NV_ENC_CREATE_BITSTREAM_BUFFER {
     pub reserved2: [*mut c_void; 64],
 }
 
-/// `NV_ENC_PIC_PARAMS` (subset + padding).
+/// `NV_ENC_PIC_PARAMS` — layout/sizes match nvEncodeAPI.h exactly.
+/// codecPicParams is the 256-byte NV_ENC_CODEC_PIC_PARAMS union; tail reserved
+/// arrays are reserved3[284] (u32) + reserved6[57] (ptr).
 #[repr(C)]
 pub struct NV_ENC_PIC_PARAMS {
     pub version: u32,
@@ -298,10 +328,24 @@ pub struct NV_ENC_PIC_PARAMS {
     pub completionEvent: *mut c_void,
     pub bufferFmt: NV_ENC_BUFFER_FORMAT,
     pub pictureStruct: NV_ENC_PIC_STRUCT,
-    pub pictureType: c_int,
-    pub codecPicParams_padding: [u8; 1024],
-    pub reserved: [u32; 128],
-    pub reserved2: [*mut c_void; 64],
+    pub pictureType: NV_ENC_PIC_TYPE,
+    pub codecPicParams: [u8; 256], // NV_ENC_CODEC_PIC_PARAMS union
+    pub meHintCountsPerBlock: [u32; 2], // 2 x NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE (u32 each)
+    pub meExternalHints: *mut c_void,
+    pub reserved2: [u32; 7],
+    pub reserved5: [*mut c_void; 2],
+    pub qpDeltaMap: *mut c_void,
+    pub qpDeltaMapSize: u32,
+    pub reservedBitFields: u32,
+    pub meHintRefPicDist: [u16; 2],
+    pub diffPicNumHint: i32,
+    pub alphaBuffer: *mut c_void,
+    pub meExternalSbHints: *mut c_void,
+    pub meSbHintsCount: u32,
+    pub stateBufferIdx: u32,
+    pub outputReconBuffer: *mut c_void,
+    pub reserved3: [u32; 284],
+    pub reserved6: [*mut c_void; 57],
 }
 
 /// `NV_ENC_LOCK_BITSTREAM` — field order/sizes match nvEncodeAPI.h exactly.
