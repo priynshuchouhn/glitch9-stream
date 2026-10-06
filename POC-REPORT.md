@@ -266,6 +266,20 @@ Deployment requires launching the engine inside each target session as SYSTEM
 (matching the production RhinoStream model), fps-limited encoding for stable
 bitrate, and the corrected viewer track handling — all now in the codebase.
 
+### Now also verified
+
+- **Audio:** WASAPI loopback capture → Opus → WebRTC, playing smoothly in the
+  remote browser. The VM's audio mix is 44.1kHz; the Opus encoder resamples to
+  the 48kHz WebRTC requires (a sample-rate mismatch was causing choppy, ~9%-slow
+  audio before the resampler was added). Viewer has a mute/unmute control
+  (starts muted for autoplay, unmutes on the Watch-stream gesture).
+- **Adaptive bitrate:** loss-based controller driven by RTCP Receiver Reports
+  (EWMA-smoothed), reconfiguring NVENC at runtime via `nvEncReconfigureEncoder`
+  with no session teardown. Observed on hardware stepping down on loss and
+  ramping back up when the path cleared, clamped to [max/8, max].
+
 Remaining POC work: RTMPS→YouTube output test (code written, needs a stream
-key), multi-viewer load test, and adaptive bitrate / congestion control for
-varying network conditions (currently fixed-rate CBR).
+key), multi-viewer load test, and a delay-based congestion signal (REMB /
+transport-wide-cc) to complement the current loss-based controller. Audio
+resampling uses a linear resampler (adequate for a POC; a polyphase/sinc
+resampler would improve fidelity for production).
