@@ -101,8 +101,8 @@ impl NvencEncoder {
 
             // 4) Preset config for H.264 + preset + tuning.
             let preset_guid = match profile.preset.as_str() {
-                "p5" => NV_ENC_PRESET_P5_GUID,
-                _ => NV_ENC_PRESET_P4_GUID,
+                "p5" => G9_NV_ENC_PRESET_P5_GUID,
+                _ => G9_NV_ENC_PRESET_P4_GUID,
             };
             let tuning = match profile.tuning.as_str() {
                 "ultra_low_latency" => NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
@@ -114,7 +114,7 @@ impl NvencEncoder {
             preset_cfg.presetCfg.version = ver_config();
             let st = (api.nvEncGetEncodePresetConfigEx.unwrap())(
                 session,
-                NV_ENC_CODEC_H264_GUID,
+                G9_NV_ENC_CODEC_H264_GUID,
                 preset_guid,
                 tuning,
                 &mut preset_cfg,
@@ -129,7 +129,7 @@ impl NvencEncoder {
             // 5) Override RC (CBR), GOP, B-frames.
             let mut config = preset_cfg.presetCfg;
             config.version = ver_config();
-            config.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+            config.profileGUID = G9_NV_ENC_H264_PROFILE_HIGH_GUID;
             config.gopLength = profile.gop_frames;
             config.frameIntervalP = (profile.b_frames as i32) + 1;
             config.rcParams.version = ver_rc();
@@ -146,7 +146,7 @@ impl NvencEncoder {
             // 6) Initialize encoder.
             let mut init = std::mem::zeroed::<NV_ENC_INITIALIZE_PARAMS>();
             init.version = ver_init();
-            init.encodeGUID = NV_ENC_CODEC_H264_GUID;
+            init.encodeGUID = G9_NV_ENC_CODEC_H264_GUID;
             init.presetGUID = preset_guid;
             init.encodeWidth = profile.width;
             init.encodeHeight = profile.height;

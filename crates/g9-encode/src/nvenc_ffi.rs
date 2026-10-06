@@ -82,3 +82,26 @@ pub const NV_ENC_PIC_FLAG_OUTPUT_SPSPPS: u32 = 0x4; // per header: OUTPUT_SPSPPS
 pub const NV_ENC_TUNING_INFO_LOW_LATENCY: i32 = 2;
 pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: i32 = 3;
 pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: i32 = 1;
+
+// --- GUID constants, defined by VALUE from nvEncodeAPI.h.
+// --- bindgen emits the header's `static const GUID` as *extern* symbols (link
+// --- errors, since we load the DLL dynamically with no import lib), so we define
+// --- our own consts with the exact byte values using the generated `GUID` type.
+#[inline]
+const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> GUID {
+    GUID {
+        Data1: d1,
+        Data2: d2,
+        Data3: d3,
+        Data4: d4,
+    }
+}
+
+pub const G9_NV_ENC_CODEC_H264_GUID: GUID =
+    guid(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
+pub const G9_NV_ENC_H264_PROFILE_HIGH_GUID: GUID =
+    guid(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
+pub const G9_NV_ENC_PRESET_P4_GUID: GUID =
+    guid(0x90a7b826, 0xdf06, 0x4862, [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81]);
+pub const G9_NV_ENC_PRESET_P5_GUID: GUID =
+    guid(0x21c6e6b4, 0x297a, 0x4cba, [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3]);
