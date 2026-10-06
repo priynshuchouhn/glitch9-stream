@@ -63,6 +63,39 @@ Every stage is verified on real NVIDIA RTX PRO 4000 hardware.
 | Geometry mismatch warning | ✅ Added | Engine warns if `--width/--height` don't match captured display |
 | Build-time commit banner | ✅ Added | First log line prints the git commit hash for deploy verification |
 
+### Benchmark (measured on the VM, 2026-10-06)
+
+Test A (WebRTC only), 1920×1080@30, 3 Mbps, p4 low-latency, running in the gamer
+session via `PsExec -s -i 2`. **Caveat:** this is a *live multi-tenant* host — 5
+gamer sessions, a running game (`007FirstLight.exe`), and the production
+RhinoStream all share the GPU, so absolute GPU numbers reflect a loaded card.
+What's meaningful is our engine's **incremental** cost.
+
+| Metric | Idle (engine off) | Engine running | Our delta |
+|--------|-------------------|----------------|-----------|
+| GPU SM % | 60–66% | 58–66% | ~0 (noise; GPU already loaded) |
+| **NVENC ENC %** | 8–13% | 10–15% | **~+2–4%** (1080p30 encode) |
+| GPU VRAM | 8766 MB | 8818 MB | **~+52 MB** |
+| Engine CPU | — | **<1% (0.59 CPU-sec)** | negligible |
+| Engine RAM (WS) | — | **61 MB** | — |
+| Engine threads | — | 78 (tokio + webrtc) | — |
+
+Engine-measured per-frame latencies (from in-process counters):
+
+- **capture:** ~10–11 ms  **convert:** **0.0 ms** (GPU Video Processor)  **encode:** **6.7–7.2 ms**
+- **cpu_readbacks: 0** (entire frame path stays on the GPU — confirmed)
+- capture 60 fps / encode 22 fps (fps-limited), **0 dropped**
+
+Takeaway: the engine adds only a few percent of the NVENC block, ~50 MB VRAM,
+and <1% CPU for a 1080p30 WebRTC stream — consistent with the RhinoStream
+reference (GPU-bound, near-zero CPU). `encoder.stats.sessionCount` reads 0 even
+while encoding (known NVENC telemetry quirk, see ANALYSIS.md); `utilization.encoder`
++ in-process counters are the reliable signal.
+
+Not yet benchmarked: Test B (YouTube), C (both shared), D (dual) — all need a
+YouTube stream key. The harness (`scripts/benchmark.ps1`) runs all four and must
+be launched inside the gamer session (not SSH session 0, which can't capture).
+
 ### Performance (1920×1080, preset p4, low_latency tuning)
 
 - **Capture FPS:** 32–56 fps (desktop-dependent; driven by DXGI present rate)
