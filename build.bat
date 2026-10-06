@@ -29,12 +29,19 @@ if errorlevel 1 (
         "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
         "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
         "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
     ) do (
         if exist %%P set "VCVARS=%%P"
     )
     if not defined VCVARS (
-        echo [build] ERROR: could not find vcvars64.bat. Install VS2022 Build Tools
-        echo         with the "Desktop development with C++" / VCTools workload.
+        echo [build] ERROR: vcvars64.bat not found. The VS2022 Build Tools are
+        echo         installed but likely missing the C++ workload. Fix with:
+        echo         Visual Studio Installer -^> Build Tools 2022 -^> Modify -^>
+        echo         check "Desktop development with C++" -^> Install.
+        echo         Or run setup.bat again as administrator.
         exit /b 1
     )
     echo [build] Initializing MSVC environment...
