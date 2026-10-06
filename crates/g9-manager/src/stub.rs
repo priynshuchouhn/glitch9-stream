@@ -4,5 +4,6 @@
 use crate::cli::{Command, Config};
 
 pub fn run(_command: &Command, _cfg: &Config) -> anyhow::Result<()> {
+    let _ = _command;
     anyhow::bail!("glitch9-manager runs on Windows only (uses the WTS session API)")
 }

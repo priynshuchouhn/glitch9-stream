@@ -43,9 +43,20 @@ pub enum Command {
     /// List active gamer sessions and whether their broadcast port is live.
     Status,
     /// Launch one engine per active gamer session.
+    ///
+    /// Needs SYSTEM (WTSQueryUserToken requires SE_TCB). If run without it, this
+    /// auto-elevates by triggering the SYSTEM scheduled task created by `deploy`.
     Start,
-    /// Stop all engine instances.
+    /// Stop all engine instances. Does not require SYSTEM.
     Stop,
+    /// One-time: register a SYSTEM scheduled task so a non-SYSTEM admin (e.g.
+    /// g9admin) can start broadcasts. Run once after copying the binary.
+    Deploy,
+    /// Remove the scheduled task created by `deploy`.
+    Undeploy,
+    /// INTERNAL: the actual SYSTEM-side start, invoked by the scheduled task.
+    /// (Equivalent to `start` but never tries to re-elevate.)
+    StartSystem,
 }
 
 /// Resolved config shared by the platform implementations.

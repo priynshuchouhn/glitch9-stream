@@ -39,7 +39,10 @@ fn main() -> anyhow::Result<()> {
         match cli.command {
             Command::Status => win::status(&cfg),
             Command::Start => win::start(&cfg),
+            Command::StartSystem => win::start_system(&cfg),
             Command::Stop => win::stop(&cfg),
+            Command::Deploy => win::deploy(&cfg),
+            Command::Undeploy => win::undeploy(),
         }
     }
     #[cfg(not(windows))]

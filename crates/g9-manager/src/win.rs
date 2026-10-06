@@ -217,7 +217,35 @@ unsafe fn build_env_with(env: *mut c_void, name: &str, value: &str) -> Vec<u16> 
     block
 }
 
+const TASK_NAME: &str = "glitch9-broadcast";
+
+/// Public `start`: usable by a NON-SYSTEM admin (e.g. g9admin). Since
+/// WTSQueryUserToken needs SE_TCB (SYSTEM-only), a non-SYSTEM caller can't launch
+/// into other sessions directly. If we're SYSTEM, do it directly; otherwise
+/// trigger the SYSTEM scheduled task created by `deploy`.
 pub fn start(cfg: &Config) -> Result<()> {
+    if is_system() {
+        return start_system(cfg);
+    }
+    tracing::info!("not running as SYSTEM; triggering the '{TASK_NAME}' SYSTEM task to start broadcasts");
+    let status = std::process::Command::new("schtasks")
+        .args(["/run", "/tn", TASK_NAME])
+        .status()
+        .context("schtasks /run")?;
+    if !status.success() {
+        anyhow::bail!(
+            "could not run the '{TASK_NAME}' task. Run `glitch9-manager deploy` once \
+             (as an admin) to register it, then retry `start`."
+        );
+    }
+    // Give the task a moment, then report status.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    status(cfg)
+}
+
+/// The actual SYSTEM-side start. Invoked directly when already SYSTEM, or by the
+/// scheduled task (`start-system`).
+pub fn start_system(cfg: &Config) -> Result<()> {
     let sessions = enumerate_gamer_sessions(cfg)?;
     if sessions.is_empty() {
         tracing::warn!("no active gamer sessions found (pattern {})", cfg.user_pattern);
@@ -233,6 +261,57 @@ pub fn start(cfg: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Register a scheduled task that runs `glitch9-manager start-system` as SYSTEM, so
+/// a non-SYSTEM admin can start broadcasts via `start` (which triggers it). The task
+/// carries the full CLI config so the SYSTEM run uses the same settings.
+pub fn deploy(cfg: &Config) -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let exe = exe.to_string_lossy().to_string();
+    // Reconstruct the config as CLI args so the SYSTEM task behaves identically.
+    let tr = format!(
+        "\"{exe}\" start-system --base-port {bp} --public-ip {ip} --engine \"{eng}\" \
+         --width {w} --height {h} --fps {fps} --bitrate {br} --user-pattern \"{pat}\" \
+         --log-dir \"{ld}\"",
+        bp = cfg.base_port, ip = cfg.public_ip, eng = cfg.engine, w = cfg.width,
+        h = cfg.height, fps = cfg.fps, br = cfg.bitrate, pat = cfg.user_pattern, ld = cfg.log_dir,
+    );
+    let status = std::process::Command::new("schtasks")
+        .args([
+            "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "once", "/st", "00:00",
+            "/ru", "SYSTEM", "/rl", "HIGHEST", "/f",
+        ])
+        .status()
+        .context("schtasks /create")?;
+    if status.success() {
+        tracing::info!("deployed SYSTEM task '{TASK_NAME}'. Now `glitch9-manager start` works as a normal admin.");
+        Ok(())
+    } else {
+        anyhow::bail!("schtasks /create failed (run deploy from an elevated admin shell)")
+    }
+}
+
+pub fn undeploy() -> Result<()> {
+    let _ = std::process::Command::new("schtasks")
+        .args(["/delete", "/tn", TASK_NAME, "/f"])
+        .status();
+    tracing::info!("removed task '{TASK_NAME}'");
+    Ok(())
+}
+
+/// Are we running as the SYSTEM account? (SYSTEM's username is "SYSTEM" under the
+/// NT AUTHORITY domain.) Cheap check via whoami.
+fn is_system() -> bool {
+    std::process::Command::new("whoami")
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .eq_ignore_ascii_case("nt authority\\system")
+        })
+        .unwrap_or(false)
 }
 
 pub fn stop(_cfg: &Config) -> Result<()> {
