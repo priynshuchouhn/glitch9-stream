@@ -130,9 +130,26 @@ impl WebRtcTransport {
         registry = register_default_interceptors(registry, &mut m)
             .map_err(|e| g9_core::Error::transport(format!("interceptors: {e}")))?;
 
+        // ICE setup for same-machine / LAN connectivity. The default webrtc-rs
+        // SettingEngine excludes loopback candidates, so a browser on 127.0.0.1 can
+        // never pair with us (ICE goes to `failed` after ~30s — exactly the symptom
+        // observed). Enable loopback host candidates and allow UDP so the host
+        // candidate pair succeeds without needing external STUN.
+        let mut se = webrtc::api::setting_engine::SettingEngine::default();
+        se.set_network_types(vec![
+            webrtc::ice::network_type::NetworkType::Udp4,
+            webrtc::ice::network_type::NetworkType::Udp6,
+        ]);
+        // Accept ALL interfaces when gathering host candidates, including loopback.
+        // webrtc-ice excludes loopback by default, which blocks a browser on
+        // 127.0.0.1 from pairing with us (ICE → failed). Accepting every interface
+        // yields a usable host candidate for same-machine and LAN viewers.
+        se.set_interface_filter(Box::new(|_name: &str| -> bool { true }));
+
         Ok(APIBuilder::new()
             .with_media_engine(m)
             .with_interceptor_registry(registry)
+            .with_setting_engine(se)
             .build())
     }
 
