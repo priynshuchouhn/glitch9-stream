@@ -140,33 +140,40 @@ impl WebRtcTransport {
             webrtc::ice::network_type::NetworkType::Udp6,
         ]);
         // Accept ALL interfaces when gathering host candidates, including loopback.
-        se.set_interface_filter(Box::new(|_name: &str| -> bool { true }));
-
         // The browser's own candidates are useless to us: Chrome hides its host IP
-        // behind an mDNS `.local` name (webrtc-rs can't resolve it) and external STUN
-        // is blocked on this VM. WebRTC only needs ONE working pair, so the browser
-        // connects to a host candidate WE advertise.
+        // behind an mDNS `.local` name (unresolvable) and external STUN is blocked.
+        // WebRTC needs ONE working pair, so the browser connects to a host candidate
+        // WE advertise.
         //
-        // webrtc-ice binds its UDP socket to 0.0.0.0 (all interfaces) by default, so
-        // it IS listening on 127.0.0.1 too — but it gathered/advertised only the
-        // primary NIC IP (103.171.97.x), which a same-machine browser can't actually
-        // reach for the STUN check. `set_nat_1to1_ips` rewrites the ADVERTISED
-        // address; because the socket is bound to 0.0.0.0, advertising 127.0.0.1
-        // points the browser at a real listening socket.
+        // DEFINITIVE same-machine fix: bind ICE to the LOOPBACK IP only, via an IP
+        // filter (which sees the real address, unlike the interface-NAME filter).
+        // Accepting only 127.x means the UDP socket is genuinely bound to loopback
+        // and the advertised 127.0.0.1 candidate points at that exact socket — no
+        // address faking, so the browser's STUN connectivity check actually reaches
+        // us. (The previous nat_1to1 approach advertised 127.0.0.1 but the socket was
+        // bound to the primary NIC, so the check went nowhere.)
         //
-        // Default: advertise 127.0.0.1 (same-machine viewer). For a LAN/remote
-        // viewer set G9_PUBLIC_IP to the VM's reachable IP instead.
-        let ips: Vec<String> = match std::env::var("G9_PUBLIC_IP") {
+        // For a LAN/remote viewer, set G9_PUBLIC_IP=<vm-ip>: accept all interfaces
+        // and advertise that routable address via nat_1to1.
+        match std::env::var("G9_PUBLIC_IP") {
             Ok(v) if !v.trim().is_empty() => {
-                v.split(',').map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()).collect()
+                se.set_interface_filter(Box::new(|_name: &str| true));
+                let ips: Vec<String> = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                se.set_nat_1to1_ips(
+                    ips,
+                    webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+                );
             }
-            _ => vec!["127.0.0.1".to_string()],
-        };
-        se.set_nat_1to1_ips(
-            ips,
-            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
-        );
+            _ => {
+                se.set_ip_filter(Box::new(|ip: std::net::IpAddr| -> bool {
+                    ip.is_loopback()
+                }));
+            }
+        }
 
         Ok(APIBuilder::new()
             .with_media_engine(m)
