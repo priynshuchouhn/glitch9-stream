@@ -53,6 +53,74 @@ pub fn enumerate_gamer_sessions(cfg: &Config) -> Result<Vec<GamerSession>> {
     Ok(out)
 }
 
+/// Resolve the public IP to advertise. If config has one, use it. Otherwise
+/// auto-detect so a single build runs on any VM: try an external echo service,
+/// then fall back to the primary outbound local address.
+pub fn resolve_public_ip(cfg: &Config) -> String {
+    if let Some(ip) = cfg.public_ip.as_ref().filter(|s| !s.trim().is_empty()) {
+        return ip.trim().to_string();
+    }
+    // 1) External echo (works when the VM has outbound internet; gives the routable
+    //    public IP even behind 1:1 NAT). Short timeout; best-effort.
+    for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"] {
+        if let Ok(out) = std::process::Command::new("curl")
+            .args(["-s", "--max-time", "4", url])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if is_ipv4(&ip) {
+                tracing::info!("auto-detected public IP {} (via {})", ip, url);
+                return ip;
+            }
+        }
+    }
+    // 2) Fallback: primary outbound IPv4 from the routing table.
+    if let Some(ip) = primary_local_ipv4() {
+        tracing::warn!("using primary local IPv4 {} (no external IP detected)", ip);
+        return ip;
+    }
+    tracing::warn!("could not detect public IP; defaulting to 0.0.0.0 (LAN viewers only)");
+    "0.0.0.0".to_string()
+}
+
+fn is_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+}
+
+/// Primary outbound IPv4 via PowerShell routing lookup (no external calls).
+fn primary_local_ipv4() -> Option<String> {
+    let ps = "(Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | \
+              Select-Object -First 1).IPv4Address.IPAddress";
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .ok()?;
+    let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if is_ipv4(&ip) { Some(ip) } else { None }
+}
+
+/// Orchestration signal: a session is "broadcastable" if session-api dropped a
+/// `broadcast.json` in that gamer's config dir (C:\glitch9-prod\configs\gamerN\).
+/// Mirrors the idle-watchdog / .rhino_apikey per-session config pattern. The file's
+/// mere presence means "an active session wants to be broadcast"; teardown removes it.
+pub fn session_has_broadcast_config(cfg: &Config, user: &str) -> bool {
+    let path = format!(
+        "{}\\{}\\broadcast.json",
+        cfg.config_root.trim_end_matches('\\'),
+        user
+    );
+    std::path::Path::new(&path).is_file()
+}
+
+/// Should this session be broadcast, per the configured source?
+pub fn session_is_active(cfg: &Config, session: &GamerSession) -> bool {
+    match cfg.source {
+        crate::cli::Source::Orchestration => session_has_broadcast_config(cfg, &session.user),
+        crate::cli::Source::Process => session_has_game(session.id),
+    }
+}
+
 /// Processes that are part of the OS/shell/streaming infra, NOT a game. If a session
 /// has any process beyond these, we treat it as "a game is running". Lowercased.
 const INFRA_PROCESSES: &[&str] = &[
@@ -168,7 +236,8 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         // var appended.
         let mut env: *mut c_void = std::ptr::null_mut();
         let have_env = CreateEnvironmentBlock(&mut env, token, false).is_ok();
-        let mut env_vec = build_env_with(env, "G9_PUBLIC_IP", &cfg.public_ip);
+        let public_ip = resolve_public_ip(cfg);
+        let mut env_vec = build_env_with(env, "G9_PUBLIC_IP", &public_ip);
         if have_env && !env.is_null() {
             let _ = DestroyEnvironmentBlock(env);
         }
@@ -302,17 +371,19 @@ pub fn start_system(base: &Config) -> Result<()> {
         tracing::warn!("no active gamer sessions found (pattern {})", cfg.user_pattern);
         return Ok(());
     }
+    let public_ip = resolve_public_ip(cfg);
     for s in &sessions {
-        // Only spawn a broadcast worker when the session actually has a game — don't
-        // burn a GPU encoder on an idle desktop.
-        if !session_has_game(s.id) {
-            tracing::info!("skip {} (session {}): no active game", s.user, s.id);
+        // Only spawn a worker when the session is active per the configured source
+        // (orchestration broadcast.json, or the process-scan fallback). Don't burn a
+        // GPU encoder on an idle/unprovisioned desktop.
+        if !session_is_active(cfg, s) {
+            tracing::info!("skip {} (session {}): not an active broadcast session", s.user, s.id);
             continue;
         }
         match launch_in_session(s, cfg) {
             Ok(pid) => tracing::info!(
                 "started broadcast: {} (session {}) -> port {} [pid {}]  http://{}:{}/",
-                s.user, s.id, s.port(cfg.base_port), pid, cfg.public_ip, s.port(cfg.base_port)
+                s.user, s.id, s.port(cfg.base_port), pid, public_ip, s.port(cfg.base_port)
             ),
             Err(e) => tracing::error!("failed to start session {} ({}): {e:#}", s.id, s.user),
         }
@@ -327,8 +398,8 @@ pub fn start_system(base: &Config) -> Result<()> {
 pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
     let cfg = &load_config_file(base);
     tracing::info!(
-        "watch: reconciling broadcasts to active-game sessions every {}s (pattern {})",
-        interval_secs, cfg.user_pattern
+        "watch: reconciling broadcasts every {}s (source={:?}, pattern {})",
+        interval_secs, cfg.source, cfg.user_pattern
     );
     // Track which session ids we currently have a worker for.
     let mut running: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -336,7 +407,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
         let sessions = enumerate_gamer_sessions(cfg).unwrap_or_default();
         let active: std::collections::HashSet<u32> = sessions
             .iter()
-            .filter(|s| session_has_game(s.id))
+            .filter(|s| session_is_active(cfg, s))
             .map(|s| s.id)
             .collect();
 
@@ -432,10 +503,14 @@ fn config_path(exe: &str) -> std::path::PathBuf {
 /// Persist config as simple `key=value` lines so the SYSTEM task reads identical
 /// settings (deploy writes it; start_system loads it).
 fn write_config_file(exe: &str, cfg: &Config) -> Result<()> {
+    let source = match cfg.source {
+        crate::cli::Source::Process => "process",
+        crate::cli::Source::Orchestration => "orchestration",
+    };
     let body = format!(
-        "base_port={}\npublic_ip={}\nengine={}\nwidth={}\nheight={}\nfps={}\nbitrate={}\nuser_pattern={}\nlog_dir={}\n",
-        cfg.base_port, cfg.public_ip, cfg.engine, cfg.width, cfg.height, cfg.fps,
-        cfg.bitrate, cfg.user_pattern, cfg.log_dir,
+        "base_port={}\npublic_ip={}\nengine={}\nwidth={}\nheight={}\nfps={}\nbitrate={}\nuser_pattern={}\nlog_dir={}\nsource={}\nconfig_root={}\n",
+        cfg.base_port, cfg.public_ip.clone().unwrap_or_default(), cfg.engine, cfg.width,
+        cfg.height, cfg.fps, cfg.bitrate, cfg.user_pattern, cfg.log_dir, source, cfg.config_root,
     );
     std::fs::write(config_path(exe), body).context("write manager-config.txt")?;
     Ok(())
@@ -457,8 +532,14 @@ fn load_config_file(base: &Config) -> Config {
         let v = v.trim().to_string();
         match k.trim() {
             "base_port" => if let Ok(x) = v.parse() { cfg.base_port = x },
-            "public_ip" => cfg.public_ip = v,
+            "public_ip" => cfg.public_ip = if v.is_empty() { None } else { Some(v) },
             "engine" => cfg.engine = v,
+            "source" => cfg.source = if v == "process" {
+                crate::cli::Source::Process
+            } else {
+                crate::cli::Source::Orchestration
+            },
+            "config_root" => cfg.config_root = v,
             "width" => if let Ok(x) = v.parse() { cfg.width = x },
             "height" => if let Ok(x) = v.parse() { cfg.height = x },
             "fps" => if let Ok(x) = v.parse() { cfg.fps = x },
@@ -511,22 +592,26 @@ pub fn stop(_cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn status(cfg: &Config) -> Result<()> {
+pub fn status(base: &Config) -> Result<()> {
+    let cfg = &load_config_file(base);
+    let ip = resolve_public_ip(cfg);
     let sessions = enumerate_gamer_sessions(cfg)?;
-    println!("Active gamer sessions and broadcast ports:");
+    println!("Active gamer sessions and broadcast ports (source={:?}):", cfg.source);
     for s in &sessions {
         let port = s.port(cfg.base_port);
         let live = port_listening(port);
+        let want = session_is_active(cfg, s);
         println!(
-            "  {:<8} session {:<3} port {}  {}",
+            "  {:<8} session {:<3} port {}  {}{}",
             s.user,
             s.id,
             port,
             if live {
-                format!("LIVE  http://{}:{}/", cfg.public_ip, port)
+                format!("LIVE  http://{}:{}/", ip, port)
             } else {
                 "stopped".to_string()
-            }
+            },
+            if want && !live { "  (active session, worker starting)" } else { "" }
         );
     }
     Ok(())
