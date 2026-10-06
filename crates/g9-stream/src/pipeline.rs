@@ -166,11 +166,28 @@ fn audio_loop(
 
     let mut capture = WasapiCapture::new(audio_cfg.sample_rate, audio_cfg.channels)?;
 
+    // CRITICAL: WASAPI shared-mode loopback uses the DEVICE mix format, not what we
+    // requested. The encoders must be built for the ACTUAL captured format or the
+    // PCM is misinterpreted (wrong rate/channels) → choppy, laggy, wrong-pitch audio.
+    let actual_rate = capture.sample_rate();
+    let actual_channels = capture.channels();
+    tracing::info!(
+        "audio capture format: {} Hz, {} ch (requested {} Hz, {} ch)",
+        actual_rate, actual_channels, audio_cfg.sample_rate, audio_cfg.channels
+    );
+    if actual_rate != 48000 {
+        tracing::warn!(
+            "WASAPI mix is {} Hz, not 48000 — Opus needs 48000; audio may be wrong \
+             pitch/speed until resampling is added",
+            actual_rate
+        );
+    }
+
     // Opus only if a WebRTC output exists; AAC only if a YouTube output exists.
     let mut opus = if outputs.webrtc {
         Some(OpusEncoder::new(
-            audio_cfg.sample_rate,
-            audio_cfg.channels,
+            actual_rate,
+            actual_channels,
             audio_cfg.opus_bitrate_bps,
         )?)
     } else {
@@ -178,8 +195,8 @@ fn audio_loop(
     };
     let mut aac = if outputs.youtube {
         Some(AacEncoder::new(
-            audio_cfg.sample_rate,
-            audio_cfg.channels,
+            actual_rate,
+            actual_channels,
             audio_cfg.aac_bitrate_bps,
         )?)
     } else {

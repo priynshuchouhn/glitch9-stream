@@ -14,6 +14,12 @@ impl WasapiCapture {
     pub fn read(&mut self) -> Result<Option<PcmChunk>> {
         Err(Error::Unsupported("WASAPI is only available on Windows".into()))
     }
+    pub fn sample_rate(&self) -> u32 {
+        48000
+    }
+    pub fn channels(&self) -> u8 {
+        2
+    }
 }
 
 pub struct AacEncoder;
