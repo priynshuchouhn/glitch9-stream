@@ -87,3 +87,31 @@ Every `--stats-interval` seconds the engine logs capture/encode FPS, per-stage
 latency (capture/convert/encode), `cpu_readbacks` (should always be 0 — the video
 path is GPU-resident), dropped-frame counters, and per-transport stats
 (state/viewers/bitrate/RTT/loss/jitter/bytes/reconnects).
+
+## Building on the VM directly (fast iteration)
+
+Instead of CI → download → copy, you can build on the Windows+NVIDIA VM. One-time
+install: rustup (MSVC), VS2022 Build Tools (VCTools + Windows SDK), LLVM, CMake,
+NASM, Git. Then from the repo root:
+
+```bat
+build.bat            :: release build (auto-loads the MSVC env + libclang)
+build.bat run        :: build, then run a 1080p60 WebRTC test
+build.bat pull run   :: git pull, build, run
+```
+
+`build.bat` finds and runs `vcvars64.bat` for you, so it works from any shell (no need
+for the "x64 Native Tools" prompt).
+
+## Cleaning up the VM
+
+```bat
+clean.bat            :: stop engine + remove build output + CI-copied folder
+clean.bat toolchain  :: also uninstall the Rust toolchain + cargo cache
+clean.bat all        :: also uninstall VS Build Tools / LLVM / CMake / NASM
+```
+
+Each destructive step prompts for confirmation. The NVIDIA driver,
+`C:\glitch9-prod` (RhinoStream) and `C:\glitch9` are never touched. The engine
+installs no service/registry/drivers, so "stop process + delete folder" is a full
+removal of the app itself.
