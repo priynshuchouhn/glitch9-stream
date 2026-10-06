@@ -66,28 +66,19 @@ pub fn struct_version(ver: u32) -> u32 {
     api_version() | (ver << 16) | (0x7 << 28)
 }
 
-// --- Clean aliases for the enum constants bindgen emits with a leading underscore
-// --- (the C enum tag is `_NV_ENC_*`, so its constants inherit that prefix). These
-// --- let nvenc.rs read naturally and keep the exact values in one place.
-pub const NV_ENC_DEVICE_TYPE_DIRECTX: _NV_ENC_DEVICE_TYPE =
-    _NV_ENC_DEVICE_TYPE_NV_ENC_DEVICE_TYPE_DIRECTX;
-pub const NV_ENC_PARAMS_RC_CBR: _NV_ENC_PARAMS_RC_MODE =
-    _NV_ENC_PARAMS_RC_MODE_NV_ENC_PARAMS_RC_CBR;
-pub const NV_ENC_PARAMS_RC_VBR: _NV_ENC_PARAMS_RC_MODE =
-    _NV_ENC_PARAMS_RC_MODE_NV_ENC_PARAMS_RC_VBR;
-pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: _NV_ENC_INPUT_RESOURCE_TYPE =
-    _NV_ENC_INPUT_RESOURCE_TYPE_NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-pub const NV_ENC_BUFFER_FORMAT_NV12: _NV_ENC_BUFFER_FORMAT =
-    _NV_ENC_BUFFER_FORMAT_NV_ENC_BUFFER_FORMAT_NV12;
-pub const NV_ENC_PIC_STRUCT_FRAME: _NV_ENC_PIC_STRUCT =
-    _NV_ENC_PIC_STRUCT_NV_ENC_PIC_STRUCT_FRAME;
-pub const NV_ENC_PIC_FLAG_FORCEIDR: _NV_ENC_PIC_FLAGS =
-    _NV_ENC_PIC_FLAGS_NV_ENC_PIC_FLAG_FORCEIDR;
-pub const NV_ENC_PIC_FLAG_OUTPUT_SPSPPS: _NV_ENC_PIC_FLAGS =
-    _NV_ENC_PIC_FLAGS_NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
-pub const NV_ENC_TUNING_INFO_LOW_LATENCY: _NV_ENC_TUNING_INFO =
-    _NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_LOW_LATENCY;
-pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: _NV_ENC_TUNING_INFO =
-    _NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
-pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: _NV_ENC_TUNING_INFO =
-    _NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_HIGH_QUALITY;
+// --- Clean, bindgen-naming-independent aliases for the enum values we use.
+// --- bindgen names enum constants inconsistently (some tags carry a leading
+// --- underscore, some don't), so instead of referencing the generated names we
+// --- define these with the literal values straight from nvEncodeAPI.h. The enum
+// --- field types are all `c_int` type-aliases, so i32 literals assign cleanly.
+pub const NV_ENC_DEVICE_TYPE_DIRECTX: i32 = 0; // DIRECTX=0, CUDA=1, OPENGL=2
+pub const NV_ENC_PARAMS_RC_CBR: i32 = 2;
+pub const NV_ENC_PARAMS_RC_VBR: i32 = 1;
+pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: i32 = 0;
+pub const NV_ENC_BUFFER_FORMAT_NV12: i32 = 0x00000001;
+pub const NV_ENC_PIC_STRUCT_FRAME: i32 = 1;
+pub const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 0x2; // per header: FORCEIDR=0x2
+pub const NV_ENC_PIC_FLAG_OUTPUT_SPSPPS: u32 = 0x4; // per header: OUTPUT_SPSPPS=0x4
+pub const NV_ENC_TUNING_INFO_LOW_LATENCY: i32 = 2;
+pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: i32 = 3;
+pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: i32 = 1;
