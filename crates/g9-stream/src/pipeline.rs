@@ -351,6 +351,7 @@ fn video_loop(
 
     tracing::info!("video pipeline running: {} encoder(s)", encoders.len());
 
+    let mut geometry_checked = false;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
@@ -369,6 +370,30 @@ fn video_loop(
         };
         metrics.capture_latency.observe(t_cap.elapsed());
         PipelineCounters::inc(&metrics.counters.frames_captured);
+
+        // One-time geometry sanity check. The NV12 converter was initialized for
+        // cfg.width x cfg.height, but DXGI captures the display's ACTUAL size. If
+        // they differ (e.g. engine run at 1920x1080 but the desktop is 1440x900),
+        // the Video Processor is fed a texture of the wrong size and emits garbage
+        // or black — the stream then shows a black screen even though everything
+        // else (encode/ICE/DTLS) is healthy. Warn loudly with the exact fix.
+        if !geometry_checked {
+            geometry_checked = true;
+            if frame.width != cfg.width || frame.height != cfg.height {
+                tracing::warn!(
+                    "GEOMETRY MISMATCH: captured display is {}x{} but engine is encoding \
+                     {}x{}. This usually causes a BLACK stream. Re-run with \
+                     --width {} --height {} to match the display.",
+                    frame.width, frame.height, cfg.width, cfg.height,
+                    frame.width, frame.height
+                );
+            } else {
+                tracing::info!(
+                    "capture geometry OK: {}x{} matches encode size",
+                    frame.width, frame.height
+                );
+            }
+        }
 
         // 2) GPU BGRA → NV12 (stays on the GPU, 0 CPU readback).
         // NOTE: we never Map()/read the pixels to system memory, so
