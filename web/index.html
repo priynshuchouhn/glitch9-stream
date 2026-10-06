@@ -50,14 +50,27 @@
       <span class="stat muted">state <b id="state">new</b></span>
     </div>
   </div>
-  <button id="go">Watch stream</button>
+  <div style="display:flex; gap:10px;">
+    <button id="go">Watch stream</button>
+    <button id="sound" disabled>🔊 Sound on</button>
+  </div>
 
   <script>
     // View-only WebRTC: the engine is the offerer-answerer; the browser sends an
     // offer with recvonly transceivers and renders the inbound H.264 track.
     const v = document.getElementById('v');
     const go = document.getElementById('go');
+    const sound = document.getElementById('sound');
     const $ = id => document.getElementById(id);
+
+    // The video element starts muted so autoplay works without a user gesture.
+    // Clicking "Watch stream" IS a gesture, so we can unmute then. The toggle lets
+    // the viewer control audio afterward.
+    sound.onclick = () => {
+      v.muted = !v.muted;
+      sound.textContent = v.muted ? '🔇 Sound off' : '🔊 Sound on';
+      if (!v.muted) v.play().catch(() => {});
+    };
 
     async function connect() {
       go.disabled = true;
@@ -91,8 +104,21 @@
         if (v.srcObject !== inboundStream) {
           v.srcObject = inboundStream;
         }
+        if (e.track.kind === 'audio') {
+          // An audio track arrived — enable the sound control and try to unmute now
+          // (we're inside the gesture chain from the Watch click, so this is allowed).
+          sound.disabled = false;
+          v.muted = false;
+          sound.textContent = '🔊 Sound on';
+        }
         // Nudge playback (autoplay can stall until a track is attached).
-        v.play().catch(() => {});
+        v.play().catch(() => {
+          // If unmuted autoplay is blocked, fall back to muted playback and let the
+          // user click the sound button.
+          v.muted = true;
+          sound.textContent = '🔇 Sound off';
+          v.play().catch(() => {});
+        });
       };
       pc.onicecandidate = (e) => {
         if (e.candidate) {
