@@ -224,10 +224,22 @@ fn audio_loop(
     };
 
     // Resolve transports by name so each codec goes to the right destination.
-    let webrtc_t = transports.iter().find(|t| t.name() == "webrtc").cloned();
+    // Opus feeds the WebRTC-family output, which is either the direct-serve
+    // transport ("webrtc", dev/LAN) or the SFU publisher ("whip", production).
+    // Matching only "webrtc" silently dropped audio in WHIP mode — the Opus track
+    // was negotiated but never fed, so the SFU showed video only.
+    let webrtc_t = transports
+        .iter()
+        .find(|t| matches!(t.name(), "webrtc" | "whip"))
+        .cloned();
     let youtube_t = transports.iter().find(|t| t.name() == "youtube").cloned();
 
-    tracing::info!("audio pipeline running (opus={}, aac={})", opus.is_some(), aac.is_some());
+    tracing::info!(
+        "audio pipeline running (opus={}, aac={}, webrtc_audio={})",
+        opus.is_some(),
+        aac.is_some(),
+        webrtc_t.is_some(),
+    );
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
