@@ -116,6 +116,14 @@ fn broadcast_config_path(cfg: &Config, user: &str) -> std::path::PathBuf {
     ))
 }
 
+fn broadcast_ready_path(cfg: &Config, user: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        "{}\\{}\\broadcast.ready",
+        cfg.config_root.trim_end_matches('\\'),
+        user
+    ))
+}
+
 /// Per-session broadcast parameters that session-api writes into broadcast.json.
 /// When `sfu_whip_base` is present, the worker publishes to the SFU via WHIP for
 /// room `session-<sessionId>`; otherwise it falls back to direct serving.
@@ -273,12 +281,15 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     // If the session's broadcast.json names an SFU, publish via WHIP (production:
     // encode once, SFU fans out). Otherwise serve browsers directly (dev/LAN).
     let bc = read_broadcast_config(cfg, &session.user);
+    let ready_file = broadcast_ready_path(cfg, &session.user);
+    let _ = std::fs::remove_file(&ready_file);
+    let ready_file = ready_file.to_string_lossy();
     let cmdline = match bc.whip_url() {
         Some(whip_url) => format!(
             "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
-             --fps {fps} --bitrate {br} --audio true",
+             --fps {fps} --bitrate {br} --audio true --ready-file \"{ready}\"",
             engine = cfg.engine, whip = whip_url, w = cfg.width, h = cfg.height,
-            fps = cfg.fps, br = cfg.bitrate,
+            fps = cfg.fps, br = cfg.bitrate, ready = ready_file,
         ),
         None => format!(
             "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
@@ -500,6 +511,14 @@ struct WorkerState {
     /// liveness rather than by a listening port.
     whip: bool,
 
+    /// The broadcast session id this worker was launched for (from broadcast.json).
+    /// Workers are keyed by Windows session id, which is stable across game sessions
+    /// on the same gamer slot — so when a new game session reuses the slot, the
+    /// session id in broadcast.json changes while the key does not. We compare this
+    /// and relaunch the engine against the new SFU room when it changes; otherwise a
+    /// stale worker keeps publishing (or failing to publish) the previous room.
+    session_id: String,
+
     /// `bytes_sent` from the last /healthz poll (to detect a stalled encoder).
     last_bytes: u64,
     /// Consecutive polls where the worker was unhealthy (not listening, no /healthz,
@@ -547,13 +566,22 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
             // WHIP publishers run no local signaling server / `/healthz` and open no
             // port — the engine pushes straight to the SFU. For those we judge health
             // by process liveness. Only direct-serve (dev/LAN) workers expose a port.
-            let whip = read_broadcast_config(cfg, &s.user).whip_url().is_some();
+            // The config also carries the game-session id, which changes when a new
+            // game session reuses this gamer slot — a signal to retarget the engine.
+            let bc = read_broadcast_config(cfg, &s.user);
+            let whip = bc.whip_url().is_some();
+            let session_id = bc.session_id.clone();
 
             match workers.get_mut(&s.id) {
-                // Known worker — health-check it.
+                // Known worker — health-check it (and retarget on a session change).
                 Some(st) => {
                     st.polls_since_spawn += 1;
-                    let healthy = if st.whip {
+                    // A new game session reused this slot: the SFU room changed, so the
+                    // running engine is publishing the wrong (old) room. Force a relaunch.
+                    let session_changed = !session_id.is_empty() && session_id != st.session_id;
+                    let healthy = if session_changed {
+                        false
+                    } else if st.whip {
                         // WHIP: alive = the engine process is still running. A crashed
                         // publisher's PID disappears, which triggers a restart below.
                         process_alive(st.pid)
@@ -570,34 +598,41 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                             None => false, // not listening / no /healthz = unhealthy
                         }
                     };
-                    if healthy {
-                        st.unhealthy_polls = 0;
-                    } else {
-                        st.unhealthy_polls += 1;
-                        tracing::warn!(
-                            "worker session {} (pid {}, whip={}) unhealthy ({}/{})",
-                            s.id, st.pid, st.whip, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD
-                        );
-                        if st.unhealthy_polls >= UNHEALTHY_RESTART_THRESHOLD {
-                            tracing::error!(
-                                "worker session {} unhealthy -> restarting", s.id
+                    // A session change restarts immediately (no threshold): the old room
+                    // is already gone, so there's nothing to protect with a grace period.
+                    let restart = session_changed || {
+                        if healthy {
+                            st.unhealthy_polls = 0;
+                            false
+                        } else {
+                            st.unhealthy_polls += 1;
+                            tracing::warn!(
+                                "worker session {} (pid {}, whip={}) unhealthy ({}/{})",
+                                s.id, st.pid, st.whip, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD
                             );
-                            // Stop the old worker precisely (by PID for WHIP, by port
-                            // for direct) before relaunching, so we never stack engines.
-                            if st.whip { stop_pid(st.pid); } else { stop_port(port); }
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            match launch_in_session(s, cfg) {
-                                Ok(pid) => {
-                                    tracing::info!(
-                                        "restarted broadcast {} (session {}) [pid {}]",
-                                        s.user, s.id, pid
-                                    );
-                                    *st = WorkerState { pid, whip, ..Default::default() };
-                                }
-                                Err(e) => {
-                                    tracing::error!("restart session {} failed: {e:#}", s.id);
-                                    *st = WorkerState::default();
-                                }
+                            st.unhealthy_polls >= UNHEALTHY_RESTART_THRESHOLD
+                        }
+                    };
+                    if restart {
+                        tracing::error!(
+                            "worker session {} -> restarting (session_changed={}, old_room={}, new_room={})",
+                            s.id, session_changed, st.session_id, session_id
+                        );
+                        // Stop the old worker precisely (by PID for WHIP, by port for
+                        // direct) before relaunching, so we never stack engines.
+                        if st.whip { stop_pid(st.pid); } else { stop_port(port); }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        match launch_in_session(s, cfg) {
+                            Ok(pid) => {
+                                tracing::info!(
+                                    "restarted broadcast {} (session {}) [pid {}] room={}",
+                                    s.user, s.id, pid, session_id
+                                );
+                                *st = WorkerState { pid, whip, session_id: session_id.clone(), ..Default::default() };
+                            }
+                            Err(e) => {
+                                tracing::error!("restart session {} failed: {e:#}", s.id);
+                                *st = WorkerState::default();
                             }
                         }
                     }
@@ -614,10 +649,10 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     match launch_in_session(s, cfg) {
                         Ok(pid) => {
                             tracing::info!(
-                                "session active -> broadcast {} (session {}) [pid {}] whip={}",
-                                s.user, s.id, pid, whip
+                                "session active -> broadcast {} (session {}) [pid {}] whip={} room={}",
+                                s.user, s.id, pid, whip, session_id
                             );
-                            workers.insert(s.id, WorkerState { pid, whip, ..Default::default() });
+                            workers.insert(s.id, WorkerState { pid, whip, session_id: session_id.clone(), ..Default::default() });
                         }
                         Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
                     }

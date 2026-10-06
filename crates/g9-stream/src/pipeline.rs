@@ -14,7 +14,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Removes an obsolete readiness marker without making playback depend on disk I/O.
+fn clear_ready_file(path: Option<&str>) {
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub async fn run(cfg: RunConfig) -> Result<()> {
+    clear_ready_file(cfg.ready_file.as_deref());
     tracing::info!("glitch9-stream build: commit {}", env!("G9_GIT_HASH"));
     tracing::info!(
         "glitch9-stream starting: outputs={:?} {}x{}@{} {} bps audio={}",
@@ -132,19 +140,38 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let transports_for_stats = transports.clone();
     let metrics_for_stats = metrics.clone();
     let geom = (cfg.video.width, cfg.video.height);
+    let ready_file = cfg.ready_file.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(stats_interval);
         let mut prev = MetricsSnapshot::default();
+        let mut previous_whip_bytes = 0;
         let interval_s = stats_interval.as_secs_f64();
         loop {
             ticker.tick().await;
             prev = print_metrics(&metrics_for_stats, &transports_for_stats, geom, interval_s, prev);
+            if let Some(path) = ready_file.as_deref() {
+                let current_whip_bytes = transports_for_stats.iter().find_map(|transport| {
+                    let stats = transport.stats();
+                    (transport.name() == "whip"
+                        && stats.state == Some(g9_core::transport::TransportState::Connected))
+                        .then(|| stats.bytes_sent.unwrap_or(0))
+                });
+                let publishing = current_whip_bytes
+                    .is_some_and(|bytes| bytes > previous_whip_bytes);
+                previous_whip_bytes = current_whip_bytes.unwrap_or(0);
+                if publishing {
+                    let _ = std::fs::write(path, b"ready\n");
+                } else {
+                    clear_ready_file(Some(path));
+                }
+            }
         }
     });
 
     // --- Wait for Ctrl-C, then shut down cleanly ---
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown requested");
+    clear_ready_file(cfg.ready_file.as_deref());
     for t in &transports {
         t.stop().await;
     }

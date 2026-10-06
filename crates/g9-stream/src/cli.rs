@@ -76,6 +76,10 @@ pub struct Cli {
     #[arg(long)]
     pub whip_token: Option<String>,
 
+    /// File refreshed while WHIP is connected and encoded media is flowing.
+    #[arg(long)]
+    pub ready_file: Option<String>,
+
     /// Metrics snapshot interval (seconds).
     #[arg(long, default_value_t = 5)]
     pub stats_interval: u64,
@@ -92,6 +96,7 @@ pub struct RunConfig {
     pub audio: AudioConfig,
     pub rtmp: Option<RtmpConfig>,
     pub signaling: SignalingConfig,
+    pub ready_file: Option<String>,
     pub stats_interval_secs: u64,
 }
 
@@ -181,6 +186,7 @@ impl Cli {
                     g9_core::config::WhipConfig { url: url.clone(), token }
                 }),
             },
+            ready_file: self.ready_file.clone(),
             stats_interval_secs: self.stats_interval,
         })
     }
