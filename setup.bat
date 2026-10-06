@@ -22,8 +22,17 @@ set "WG=winget install -e --accept-source-agreements --accept-package-agreements
 echo [setup] Installing Rust rustup MSVC...
 %WG% --id Rustlang.Rustup
 
-echo [setup] Installing VS2022 Build Tools VCTools + Win11 SDK...
-%WG% --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621"
+echo [setup] Installing/modifying VS2022 Build Tools VCTools + Win11 SDK...
+set "VSWORKLOADS=--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --quiet --wait --norestart"
+set "VSINSTALLER=C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe"
+set "VSBT=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+if exist "%VSBT%" goto vs_modify
+%WG% --id Microsoft.VisualStudio.2022.BuildTools --override "%VSWORKLOADS%"
+goto vs_done
+:vs_modify
+echo [setup] Build Tools present; adding C++ workload via VS installer modify...
+"%VSINSTALLER%" modify --installPath "%VSBT%" %VSWORKLOADS%
+:vs_done
 
 echo [setup] Installing LLVM libclang...
 %WG% --id LLVM.LLVM
