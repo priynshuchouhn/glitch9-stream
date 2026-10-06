@@ -334,17 +334,30 @@ glitch9-manager.exe status
 glitch9-manager.exe stop       REM stop the watcher + all engines
 ```
 
-**Game-gated workers (watch mode).** The deployed task runs `watch` as SYSTEM: a
-reconcile loop that spawns a broadcast worker **only when a session has an active
-game**, and stops it (by port) when the game exits — so no GPU encoder is wasted on
-an idle desktop. Game detection uses `WTSEnumerateProcessesW`: any process in the
-session that isn't on the OS/shell/infra denylist (explorer, svchost, RhinoStream,
-our own binaries, system tray apps, etc.) counts as a game.
+**Orchestration-driven workers (watch mode).** The deployed task runs `watch` as
+SYSTEM: a reconcile loop that spawns a broadcast worker when a session becomes
+active and stops it when the session ends — so no GPU encoder is wasted on an idle
+desktop. Two sources (`--source`):
 
-Verified on hardware: with Forza (session 3) and Hitman (session 4) running and
-three idle sessions, the watcher spawned **exactly 2 workers** (sessions 3 & 4
-LIVE); gamer1/4/5 got none. This keeps active-encoder count — the real GPU
-constraint from the benchmark — matched to actual gameplay.
+- **orchestration (default, production):** driven by a per-session `broadcast.json`
+  that Glitch9's session-api drops on the VM via the vm-agent — `start` on session
+  provision, cleared on teardown. This mirrors the existing idle-watchdog /
+  `.rhino_apikey` per-session config pattern. The orchestration side is wired in
+  `glitch9-game-orchestration`: new vm-agent `place/clear-broadcast-config`
+  endpoints + session-api `placeBroadcastConfig`/`clearBroadcastConfig` calls in
+  `provisionSession`/`teardownSession`, gated by `BROADCAST_ENABLED`.
+- **process (fallback):** detect a game via `WTSEnumerateProcessesW` (any session
+  process not on the OS/shell/infra denylist counts as a game).
+
+**No hardcoded IP (multi-VM).** `--public-ip` is optional; unset, the manager
+auto-detects the VM's public IP (external echo `api.ipify.org`, then primary NIC).
+One build deploys to any VM — verified it auto-detected `103.171.97.176` via ipify.
+
+Verified on hardware (orchestration source): dropping `broadcast.json` for gamer1
+only → watcher spawned **exactly one** broadcast (gamer1 LIVE), others stopped even
+though gamer2/gamer3 had games running — proving the signal is the orchestration
+file, not the process. Removing the file → watcher tore the worker down. Full
+session start/end lifecycle driven by session-api.
 
 Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
 5 engine processes, all ports LIVE. Sessions with active content capture at
