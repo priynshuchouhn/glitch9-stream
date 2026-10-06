@@ -228,11 +228,11 @@ pub fn start(cfg: &Config) -> Result<()> {
         return start_system(cfg);
     }
     tracing::info!("not running as SYSTEM; triggering the '{TASK_NAME}' SYSTEM task to start broadcasts");
-    let status = std::process::Command::new("schtasks")
+    let run_st = std::process::Command::new("schtasks")
         .args(["/run", "/tn", TASK_NAME])
         .status()
         .context("schtasks /run")?;
-    if !status.success() {
+    if !run_st.success() {
         anyhow::bail!(
             "could not run the '{TASK_NAME}' task. Run `glitch9-manager deploy` once \
              (as an admin) to register it, then retry `start`."
