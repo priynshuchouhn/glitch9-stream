@@ -90,7 +90,12 @@
           }));
         }
       };
-      pc.onconnectionstatechange = () => { $('state').textContent = pc.connectionState; };
+      pc.onconnectionstatechange = () => {
+        $('state').textContent = pc.connectionState;
+        if (pc.connectionState === 'failed') {
+          console.warn('[ICE] connection failed. If viewing on the same machine, disable Chrome mDNS: chrome://flags/#enable-webrtc-hide-local-ips-with-mdns -> Disabled, relaunch, retry.');
+        }
+      };
 
       ws.onopen = async () => {
         const offer = await pc.createOffer();
