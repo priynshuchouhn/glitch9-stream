@@ -328,11 +328,23 @@ Two hard-won deployment details:
 
 Operator flow (as g9admin, no SYSTEM shell / no PsExec):
 ```bat
-glitch9-manager.exe deploy    REM one-time: register the SYSTEM task
-glitch9-manager.exe start     REM start one broadcast per gamer session
+glitch9-manager.exe deploy    REM one-time: register the SYSTEM watcher task
+glitch9-manager.exe start     REM launch the watcher (auto-manages per-session)
 glitch9-manager.exe status
-glitch9-manager.exe stop
+glitch9-manager.exe stop       REM stop the watcher + all engines
 ```
+
+**Game-gated workers (watch mode).** The deployed task runs `watch` as SYSTEM: a
+reconcile loop that spawns a broadcast worker **only when a session has an active
+game**, and stops it (by port) when the game exits — so no GPU encoder is wasted on
+an idle desktop. Game detection uses `WTSEnumerateProcessesW`: any process in the
+session that isn't on the OS/shell/infra denylist (explorer, svchost, RhinoStream,
+our own binaries, system tray apps, etc.) counts as a game.
+
+Verified on hardware: with Forza (session 3) and Hitman (session 4) running and
+three idle sessions, the watcher spawned **exactly 2 workers** (sessions 3 & 4
+LIVE); gamer1/4/5 got none. This keeps active-encoder count — the real GPU
+constraint from the benchmark — matched to actual gameplay.
 
 Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
 5 engine processes, all ports LIVE. Sessions with active content capture at
