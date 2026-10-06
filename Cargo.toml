@@ -9,6 +9,7 @@ members = [
     "crates/g9-webrtc",
     "crates/g9-rtmp",
     "crates/g9-stream",
+    "crates/g9-manager",
 ]
 
 [workspace.package]
@@ -64,6 +65,10 @@ features = [
     "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_Security",
+    # --- used by g9-manager to launch an engine inside each gamer session ---
+    "Win32_System_RemoteDesktop",   # WTSEnumerateSessions / WTSQueryUserToken
+    "Win32_System_Environment",     # CreateEnvironmentBlock
+    "Win32_System_StationsAndDesktops",
 ]
 
 [profile.release]

@@ -1,0 +1,18 @@
+[package]
+name = "g9-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "glitch9-manager"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
