@@ -190,13 +190,17 @@ impl SignalingServer {
 
                 // Loss-based adaptive bitrate controller (a simplified GCC loss
                 // signal). Each Receiver Report carries fraction_lost (0-255 = 0-100%
-                // of packets lost since the last report). React:
-                //   - loss > 10%  -> multiplicative decrease (x0.85): back off hard
-                //   - loss <  2%  -> additive increase (+5% of max): probe upward
-                //   - 2-10%       -> hold
-                // Clamped to [min_bitrate, max_bitrate]. This keeps the stream within
-                // what the path can carry instead of a fixed CBR that floods a weak
-                // link (which earlier produced 40-60% loss and a black screen).
+                // of packets lost since the last report). Receiver Reports can arrive
+                // several times a second, so reacting to every one makes the rate
+                // oscillate wildly. Instead we smooth loss with an EWMA and apply at
+                // most one adjustment per second:
+                //   - smoothed loss > 10% -> multiplicative decrease (x0.85)
+                //   - smoothed loss <  2% -> additive increase (+5% of ceiling)
+                //   - 2-10%               -> hold
+                // Clamped to [min_bitrate, max_bitrate]. Keeps the stream within what
+                // the path can carry instead of a fixed CBR that floods a weak link.
+                let mut ewma_loss: f64 = 0.0;
+                let mut last_adjust = std::time::Instant::now();
                 while let Ok((pkts, _attrs)) = video_sender.read_rtcp().await {
                     for p in &pkts {
                         if p.as_any().downcast_ref::<PictureLossIndication>().is_some()
@@ -208,7 +212,6 @@ impl SignalingServer {
                             }
                         }
                         if let Some(rr) = p.as_any().downcast_ref::<ReceiverReport>() {
-                            // Use the worst fraction_lost across reception reports.
                             let frac = rr
                                 .reports
                                 .iter()
@@ -216,23 +219,29 @@ impl SignalingServer {
                                 .max()
                                 .unwrap_or(0);
                             let loss = frac as f64 / 256.0;
-                            let cur = target_bitrate.load(Ordering::Relaxed).max(min_bitrate);
-                            let next = if loss > 0.10 {
-                                ((cur as f64) * 0.85) as u32
-                            } else if loss < 0.02 {
-                                cur + (max_bitrate / 20) // +5% of ceiling
-                            } else {
-                                cur
-                            }
-                            .clamp(min_bitrate, max_bitrate);
-                            if next != cur {
-                                tracing::info!(
-                                    target: "g9::webrtc",
-                                    "ABR: loss={:.1}% {} -> {} kbps",
-                                    loss * 100.0, cur / 1000, next / 1000
-                                );
-                                target_bitrate.store(next, Ordering::Relaxed);
-                            }
+                            // EWMA (alpha=0.3) so a single spike doesn't whipsaw the rate.
+                            ewma_loss = 0.3 * loss + 0.7 * ewma_loss;
+                        }
+                    }
+                    // Apply at most once per second based on the smoothed loss.
+                    if last_adjust.elapsed() >= std::time::Duration::from_secs(1) {
+                        last_adjust = std::time::Instant::now();
+                        let cur = target_bitrate.load(Ordering::Relaxed).max(min_bitrate);
+                        let next = if ewma_loss > 0.10 {
+                            ((cur as f64) * 0.85) as u32
+                        } else if ewma_loss < 0.02 {
+                            cur + (max_bitrate / 20)
+                        } else {
+                            cur
+                        }
+                        .clamp(min_bitrate, max_bitrate);
+                        if next != cur {
+                            tracing::info!(
+                                target: "g9::webrtc",
+                                "ABR: loss={:.1}% {} -> {} kbps",
+                                ewma_loss * 100.0, cur / 1000, next / 1000
+                            );
+                            target_bitrate.store(next, Ordering::Relaxed);
                         }
                     }
                 }
