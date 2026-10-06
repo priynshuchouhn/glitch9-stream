@@ -244,8 +244,10 @@ pub fn start(cfg: &Config) -> Result<()> {
 }
 
 /// The actual SYSTEM-side start. Invoked directly when already SYSTEM, or by the
-/// scheduled task (`start-system`).
-pub fn start_system(cfg: &Config) -> Result<()> {
+/// scheduled task (`start-system`). Loads the persisted config so a task launched
+/// with no args still uses the settings chosen at `deploy` time.
+pub fn start_system(base: &Config) -> Result<()> {
+    let cfg = &load_config_file(base);
     let sessions = enumerate_gamer_sessions(cfg)?;
     if sessions.is_empty() {
         tracing::warn!("no active gamer sessions found (pattern {})", cfg.user_pattern);
@@ -269,14 +271,13 @@ pub fn start_system(cfg: &Config) -> Result<()> {
 pub fn deploy(cfg: &Config) -> Result<()> {
     let exe = std::env::current_exe().context("current_exe")?;
     let exe = exe.to_string_lossy().to_string();
-    // Reconstruct the config as CLI args so the SYSTEM task behaves identically.
-    let tr = format!(
-        "\"{exe}\" start-system --base-port {bp} --public-ip {ip} --engine \"{eng}\" \
-         --width {w} --height {h} --fps {fps} --bitrate {br} --user-pattern \"{pat}\" \
-         --log-dir \"{ld}\"",
-        bp = cfg.base_port, ip = cfg.public_ip, eng = cfg.engine, w = cfg.width,
-        h = cfg.height, fps = cfg.fps, br = cfg.bitrate, pat = cfg.user_pattern, ld = cfg.log_dir,
-    );
+
+    // schtasks caps /tr at 261 chars, so we can't inline all flags. Persist the
+    // config next to the exe and have `start-system` load it; the task command is
+    // then just `"<exe>" start-system`.
+    write_config_file(&exe, cfg)?;
+
+    let tr = format!("\"{exe}\" start-system");
     let status = std::process::Command::new("schtasks")
         .args([
             "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "once", "/st", "00:00",
@@ -290,6 +291,55 @@ pub fn deploy(cfg: &Config) -> Result<()> {
     } else {
         anyhow::bail!("schtasks /create failed (run deploy from an elevated admin shell)")
     }
+}
+
+/// Path of the persisted config (next to the manager exe).
+fn config_path(exe: &str) -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(exe);
+    p.set_file_name("manager-config.txt");
+    p
+}
+
+/// Persist config as simple `key=value` lines so the SYSTEM task reads identical
+/// settings (deploy writes it; start_system loads it).
+fn write_config_file(exe: &str, cfg: &Config) -> Result<()> {
+    let body = format!(
+        "base_port={}\npublic_ip={}\nengine={}\nwidth={}\nheight={}\nfps={}\nbitrate={}\nuser_pattern={}\nlog_dir={}\n",
+        cfg.base_port, cfg.public_ip, cfg.engine, cfg.width, cfg.height, cfg.fps,
+        cfg.bitrate, cfg.user_pattern, cfg.log_dir,
+    );
+    std::fs::write(config_path(exe), body).context("write manager-config.txt")?;
+    Ok(())
+}
+
+/// Load persisted config if present, overlaying onto the given base config.
+fn load_config_file(base: &Config) -> Config {
+    let mut cfg = base.clone();
+    let exe = match std::env::current_exe() {
+        Ok(e) => e.to_string_lossy().to_string(),
+        Err(_) => return cfg,
+    };
+    let text = match std::fs::read_to_string(config_path(&exe)) {
+        Ok(t) => t,
+        Err(_) => return cfg,
+    };
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.trim().to_string();
+        match k.trim() {
+            "base_port" => if let Ok(x) = v.parse() { cfg.base_port = x },
+            "public_ip" => cfg.public_ip = v,
+            "engine" => cfg.engine = v,
+            "width" => if let Ok(x) = v.parse() { cfg.width = x },
+            "height" => if let Ok(x) = v.parse() { cfg.height = x },
+            "fps" => if let Ok(x) = v.parse() { cfg.fps = x },
+            "bitrate" => if let Ok(x) = v.parse() { cfg.bitrate = x },
+            "user_pattern" => cfg.user_pattern = v,
+            "log_dir" => cfg.log_dir = v,
+            _ => {}
+        }
+    }
+    cfg
 }
 
 pub fn undeploy() -> Result<()> {
