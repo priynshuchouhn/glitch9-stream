@@ -28,6 +28,9 @@ const VIEWER_HTML: &str = include_str!("../../../web/index.html");
 async fn serve_viewer_page(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // Disable Nagle so the full response goes out promptly.
+    let _ = stream.set_nodelay(true);
+
     // Drain the request headers (read until the blank line, bounded).
     let mut buf = [0u8; 2048];
     let mut total = 0usize;
@@ -50,8 +53,24 @@ async fn serve_viewer_page(mut stream: tokio::net::TcpStream) -> std::io::Result
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body).await?;
     stream.flush().await?;
-    // Graceful close so the browser reads the full body before FIN.
+
+    // Avoid the Windows "RST on close with unread data" that truncates the response:
+    // half-close our write side (sends FIN), then read until the client closes its
+    // side (EOF). Letting the client close first means a clean FIN both ways, no RST.
     let _ = stream.shutdown().await;
+    let mut drain = [0u8; 1024];
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut drain),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break, // client closed, or timed out
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) => break,
+        }
+    }
     Ok(())
 }
 use webrtc::api::API;
