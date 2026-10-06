@@ -404,8 +404,38 @@ glitch9-manager.exe stop     # stop all (does not need SYSTEM)
   with no session teardown. Observed on hardware stepping down on loss and
   ramping back up when the path cleared, clamped to [max/8, max].
 
-Remaining POC work: RTMPS→YouTube output test (code written, needs a stream
-key), multi-viewer load test, and a delay-based congestion signal (REMB /
-transport-wide-cc) to complement the current loss-based controller. Audio
-resampling uses a linear resampler (adequate for a POC; a polyphase/sinc
-resampler would improve fidelity for production).
+### Production hardening (added, verified on hardware)
+
+- **Health endpoint:** the engine serves `GET /healthz` → JSON
+  `{state, viewers, bytes_sent, target_bitrate_bps, port}`.
+- **Worker health-check + auto-restart:** the watcher polls each worker's
+  `/healthz`; a worker that stops listening or whose `bytes_sent` goes flat (past
+  a startup grace window) is restarted after ~15s of sustained trouble — matching
+  RhinoStream's watchdog reliability model.
+- **GPU-budget cap:** `--max-broadcasts` (default 4) limits concurrent broadcast
+  workers so they can't push the GPU past the overload/TDR threshold the
+  orchestration already guards (the benchmark showed ~3-5 active 1080p broadcasts
+  saturate one GPU).
+- **Windows service:** `glitch9-manager install-service` registers an auto-start
+  LocalSystem service `Glitch9Broadcast` with SCM auto-restart on failure; it runs
+  the watch loop as SYSTEM (so it has the SE_TCB privilege to launch into gamer
+  sessions) and tears workers down on stop. Replaces the scheduled task for
+  production. Verified: installs → RUNNING → spawns a worker on broadcast.json →
+  `/healthz` reports bytes climbing → clean stop + uninstall.
+- **Deploy pipeline:** CI ships `glitch9-manager.exe` + a `glitch9-stream.zip`
+  deploy bundle and publishes a GitHub Release on `v*` tags; the vm-agent
+  `/update-broadcast` endpoint (orchestration repo) downloads+extracts the zip and
+  (re)installs the service — an idempotent per-VM deploy hook, callable from
+  session-api (`updateBroadcast()`).
+
+Remaining for production: viewer connectivity for arbitrary spectators
+(STUN/TURN + an authenticated viewer gateway — the main blocker), RTMPS→YouTube
+output test (code written, needs a stream key), multi-viewer load test, centralized
+observability/alerting, and a delay-based congestion signal to complement the
+loss-based ABR. Audio uses a linear resampler (a polyphase/sinc one would improve
+fidelity).
+
+NOTE: the CI workflow change (`.github/workflows/windows-build.yml`) is committed
+locally but could not be pushed by this session (the token lacks GitHub `workflow`
+scope); push it with workflow-scoped creds or apply via the web UI. The vm-agent +
+session-api changes live in the `glitch9-game-orchestration` repo (separate deploy).
