@@ -16,5 +16,8 @@ bytes.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
-[build-dependencies]
-# On Windows the build script locates the NVIDIA Video Codec SDK headers/lib.
+# bindgen generates NVENC bindings from the vendored nvEncodeAPI.h on Windows,
+# giving byte-exact struct layouts (no hand-maintained FFI). Needs libclang +
+# the Windows SDK headers present (both available on windows-latest CI runners).
+[target.'cfg(windows)'.build-dependencies]
+bindgen = "0.70"

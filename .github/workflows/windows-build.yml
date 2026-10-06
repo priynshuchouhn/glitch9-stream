@@ -22,6 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Sets INCLUDE/LIB so libclang (bindgen) can find <windows.h> + the Windows SDK.
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install Rust (MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,6 +38,12 @@ jobs:
           choco install cmake nasm --no-progress -y
           echo "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           echo "C:\Program Files\NASM"      | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install LLVM/Clang (libclang for bindgen → NVENC headers)
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
