@@ -144,6 +144,19 @@ impl NvencEncoder {
             config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
             config.rcParams.lookaheadDepth = profile.lookahead as u16;
 
+            // H.264-specific config: force SPS/PPS on EVERY IDR. This is the real
+            // fix for the browser black screen — without it, periodic GOP keyframes
+            // are bare IDRs with no parameter sets, so the decoder can never
+            // initialize (bytes arrive, framesDecoded stays 0). repeatSPSPPS=1 makes
+            // every keyframe self-contained and decodable by a viewer that joins at
+            // any time. idrPeriod = gopLength keeps IDR cadence aligned with the GOP.
+            {
+                let h264 = &mut config.encodeCodecConfig.h264Config;
+                h264.set_repeatSPSPPS(1);
+                h264.set_disableSPSPPS(0);
+                h264.idrPeriod = profile.gop_frames;
+            }
+
             // 6) Initialize encoder.
             let mut init = std::mem::zeroed::<NV_ENC_INITIALIZE_PARAMS>();
             init.version = ver_init();
@@ -245,10 +258,13 @@ impl NvencEncoder {
             pic.outputBitstream = self.bitstream;
             pic.inputTimeStamp = pts.as_millis() as u64;
             pic.frameIdx = self.frame_index;
-            if self.force_idr {
+            let requested_idr = self.force_idr;
+            if requested_idr {
                 pic.encodePicFlags |=
                     (NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS) as u32;
-                self.force_idr = false;
+                // Don't clear force_idr yet: if this encode returns NEED_MORE_INPUT
+                // (frame buffered, nothing emitted), the IDR request would be lost.
+                // Clear it only once we know a bitstream was produced (below).
             }
 
             let st = (self.api.nvEncEncodePicture.unwrap())(self.encoder, &mut pic);
@@ -258,6 +274,8 @@ impl NvencEncoder {
             self.frame_index += 1;
 
             if st == NV_ENC_ERR_NEED_MORE_INPUT_I {
+                // Frame buffered, nothing emitted — keep force_idr pending so the
+                // next emitted frame still carries the forced IDR + SPS/PPS.
                 return Ok(None);
             }
             if st != NV_ENC_SUCCESS {
@@ -265,6 +283,11 @@ impl NvencEncoder {
                     "EncodePicture: {} ({st})",
                     status_name(st)
                 )));
+            }
+            // A bitstream was produced for this submission; the IDR request (if any)
+            // has now been satisfied.
+            if requested_idr {
+                self.force_idr = false;
             }
 
             let mut lock = std::mem::zeroed::<NV_ENC_LOCK_BITSTREAM>();
