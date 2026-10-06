@@ -346,6 +346,7 @@ impl MediaTransport for WebRtcTransport {
             target_bitrate: self.target_bitrate.clone(),
             min_bitrate: self.min_bitrate,
             max_bitrate: self.max_bitrate,
+            bytes_sent: self.bytes_sent.clone(),
         };
 
         tokio::spawn(async move {

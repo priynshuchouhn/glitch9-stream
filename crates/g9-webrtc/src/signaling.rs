@@ -10,7 +10,7 @@
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
@@ -106,6 +106,10 @@ pub struct SignalingServer {
     pub target_bitrate: Arc<AtomicU32>,
     pub min_bitrate: u32,
     pub max_bitrate: u32,
+    /// Total encoded media bytes written to tracks. Climbs while the worker is
+    /// producing video — the watcher polls `/healthz` and treats a flat value as a
+    /// stalled/unhealthy worker.
+    pub bytes_sent: Arc<AtomicU64>,
 }
 
 impl SignalingServer {
@@ -124,12 +128,15 @@ impl SignalingServer {
                 // (\r\n\r\n) or the Upgrade line, with a short bound.
                 let mut peek = [0u8; 2048];
                 let mut is_ws = false;
+                let mut is_health = false;
                 for _ in 0..50 {
                     match stream.peek(&mut peek).await {
                         Ok(0) => break,
                         Ok(n) => {
                             let head = String::from_utf8_lossy(&peek[..n]).to_ascii_lowercase();
                             is_ws = head.contains("upgrade: websocket");
+                            // Route GET /healthz to the health JSON (watcher polls it).
+                            is_health = head.starts_with("get /healthz");
                             if is_ws || head.contains("\r\n\r\n") {
                                 break;
                             }
@@ -138,7 +145,7 @@ impl SignalingServer {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-                tracing::debug!(target: "g9::webrtc", "conn {peer}: is_ws={is_ws}");
+                tracing::debug!(target: "g9::webrtc", "conn {peer}: is_ws={is_ws} is_health={is_health}");
 
                 if is_ws {
                     match tokio_tungstenite::accept_async(stream).await {
@@ -149,6 +156,10 @@ impl SignalingServer {
                         }
                         Err(e) => tracing::debug!(target: "g9::webrtc", "ws upgrade failed: {e}"),
                     }
+                } else if is_health {
+                    if let Err(e) = srv.serve_health(stream).await {
+                        tracing::debug!(target: "g9::webrtc", "serve healthz: {e}");
+                    }
                 } else {
                     // Serve the embedded viewer page for any plain HTTP GET.
                     if let Err(e) = serve_viewer_page(stream).await {
@@ -157,6 +168,38 @@ impl SignalingServer {
                 }
             });
         }
+    }
+
+    /// Serve `GET /healthz` as a small JSON health snapshot. The watcher polls this
+    /// to decide if a worker is healthy: `bytes_sent` climbing between two polls
+    /// means the broadcast is producing video; a flat value (while listening) means
+    /// a stalled/unhealthy worker that should be restarted.
+    async fn serve_health(&self, mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = stream.set_nodelay(true);
+        // Drain request headers (bounded).
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await;
+
+        let state = self.state.load(Ordering::Relaxed);
+        let viewers = self.viewers.load(Ordering::Relaxed);
+        let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
+        let target_bitrate = self.target_bitrate.load(Ordering::Relaxed);
+        let body = format!(
+            "{{\"status\":\"ok\",\"state\":{state},\"viewers\":{viewers},\
+             \"bytes_sent\":{bytes_sent},\"target_bitrate_bps\":{target_bitrate},\
+             \"port\":{}}}",
+            self.port
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).await?;
+        stream.write_all(body.as_bytes()).await?;
+        stream.flush().await?;
+        let _ = stream.shutdown().await;
+        Ok(())
     }
 
     /// Handle one browser viewer over its WebSocket.

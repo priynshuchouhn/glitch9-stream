@@ -48,6 +48,14 @@ pub struct Cli {
     /// (C:\glitch9-prod\configs\gamerN\broadcast.json). Orchestration source.
     #[arg(long, default_value = r"C:\glitch9-prod\configs", global = true)]
     pub config_root: String,
+
+    /// Max concurrent broadcast workers on this VM (GPU-budget guard). Broadcasts
+    /// add NVENC load on top of the games + player streams; the benchmark showed
+    /// ~3-5 active 1080p broadcasts saturate one GPU. The watcher won't spawn beyond
+    /// this many at once, so broadcasts can't push the GPU past the overload (TDR)
+    /// threshold the orchestration already guards. Default 4.
+    #[arg(long, default_value_t = 4, global = true)]
+    pub max_broadcasts: u32,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -102,6 +110,7 @@ pub struct Config {
     pub log_dir: String,
     pub source: Source,
     pub config_root: String,
+    pub max_broadcasts: u32,
 }
 
 impl Cli {
@@ -121,6 +130,7 @@ impl Cli {
                 _ => Source::Orchestration,
             },
             config_root: self.config_root.clone(),
+            max_broadcasts: self.max_broadcasts.max(1),
         }
     }
 }

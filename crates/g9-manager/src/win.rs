@@ -395,14 +395,35 @@ pub fn start_system(base: &Config) -> Result<()> {
 /// Spawns a worker when a session's game starts; stops it when the game exits. Runs
 /// until killed. Must be SYSTEM (same token requirement as start). Poll interval in
 /// seconds.
+/// Per-session worker tracking for the watchdog.
+#[derive(Default)]
+struct WorkerState {
+    /// `bytes_sent` from the last /healthz poll (to detect a stalled encoder).
+    last_bytes: u64,
+    /// Consecutive polls where the worker was unhealthy (not listening, no /healthz,
+    /// or bytes_sent flat). Restart when this crosses the threshold.
+    unhealthy_polls: u32,
+    /// Monotonic poll count since (re)spawn — gives a startup grace period before
+    /// we judge "bytes not climbing" as unhealthy (first frames take a moment).
+    polls_since_spawn: u32,
+}
+
 pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
     let cfg = &load_config_file(base);
+    // After this many consecutive unhealthy polls, restart the worker. With a 5s
+    // interval that's ~15s of sustained trouble before a restart — long enough to
+    // not thrash on a transient blip, short enough to recover a crashed worker fast.
+    const UNHEALTHY_RESTART_THRESHOLD: u32 = 3;
+    // Grace polls after spawn before judging bytes-not-climbing (startup + an idle
+    // desktop that legitimately produces no frames until there's motion).
+    const SPAWN_GRACE_POLLS: u32 = 4;
+
     tracing::info!(
-        "watch: reconciling broadcasts every {}s (source={:?}, pattern {})",
+        "watch: reconciling + health-checking broadcasts every {}s (source={:?}, pattern {})",
         interval_secs, cfg.source, cfg.user_pattern
     );
-    // Track which session ids we currently have a worker for.
-    let mut running: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut workers: std::collections::HashMap<u32, WorkerState> = std::collections::HashMap::new();
+
     loop {
         let sessions = enumerate_gamer_sessions(cfg).unwrap_or_default();
         let active: std::collections::HashSet<u32> = sessions
@@ -411,33 +432,118 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
             .map(|s| s.id)
             .collect();
 
-        // Spawn for newly-active sessions.
+        // Enforce a per-VM concurrent-broadcast cap (GPU-budget guard). Spawning is
+        // only allowed while we're under the cap; existing workers are always kept
+        // health-checked.
+        let cap = cfg.max_broadcasts;
+
         for s in &sessions {
-            if active.contains(&s.id) && !running.contains(&s.id) {
-                match launch_in_session(s, cfg) {
-                    Ok(pid) => {
-                        tracing::info!(
-                            "game started -> broadcast {} (session {}) port {} [pid {}]",
-                            s.user, s.id, s.port(cfg.base_port), pid
+            if !active.contains(&s.id) {
+                continue;
+            }
+            let port = s.port(cfg.base_port);
+            let listening = port_listening(port);
+            let health = if listening { poll_health(port) } else { None };
+
+            match workers.get_mut(&s.id) {
+                // Known worker — health-check it.
+                Some(st) => {
+                    st.polls_since_spawn += 1;
+                    let healthy = match &health {
+                        Some(h) => {
+                            // Healthy if listening and bytes advanced, OR still within
+                            // the startup grace window (idle desktop = legit 0 bytes).
+                            let advanced = h.bytes_sent > st.last_bytes;
+                            st.last_bytes = h.bytes_sent;
+                            advanced || st.polls_since_spawn <= SPAWN_GRACE_POLLS
+                        }
+                        None => false, // not listening / no /healthz = unhealthy
+                    };
+                    if healthy {
+                        st.unhealthy_polls = 0;
+                    } else {
+                        st.unhealthy_polls += 1;
+                        tracing::warn!(
+                            "worker session {} (port {}) unhealthy ({}/{}): listening={}",
+                            s.id, port, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD, listening
                         );
-                        running.insert(s.id);
+                        if st.unhealthy_polls >= UNHEALTHY_RESTART_THRESHOLD {
+                            tracing::error!(
+                                "worker session {} (port {}) unhealthy -> restarting", s.id, port
+                            );
+                            stop_port(port);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            match launch_in_session(s, cfg) {
+                                Ok(pid) => tracing::info!(
+                                    "restarted broadcast {} (session {}) port {} [pid {}]",
+                                    s.user, s.id, port, pid
+                                ),
+                                Err(e) => tracing::error!("restart session {} failed: {e:#}", s.id),
+                            }
+                            *st = WorkerState::default();
+                        }
                     }
-                    Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
+                }
+                // No worker yet — spawn if under the GPU-budget cap.
+                None => {
+                    if workers.len() as u32 >= cap {
+                        tracing::warn!(
+                            "session {} active but broadcast cap {} reached — not spawning (GPU budget)",
+                            s.id, cap
+                        );
+                        continue;
+                    }
+                    match launch_in_session(s, cfg) {
+                        Ok(pid) => {
+                            tracing::info!(
+                                "session active -> broadcast {} (session {}) port {} [pid {}]",
+                                s.user, s.id, port, pid
+                            );
+                            workers.insert(s.id, WorkerState::default());
+                        }
+                        Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
+                    }
                 }
             }
         }
 
-        // Stop workers whose game ended (or whose session vanished).
-        let to_stop: Vec<u32> = running.iter().copied().filter(|id| !active.contains(id)).collect();
+        // Stop workers whose session ended (or vanished).
+        let to_stop: Vec<u32> = workers.keys().copied().filter(|id| !active.contains(id)).collect();
         for id in to_stop {
             let port = cfg.base_port.saturating_add(id as u16);
-            tracing::info!("game ended -> stopping broadcast for session {} (port {})", id, port);
+            tracing::info!("session ended -> stopping broadcast for session {} (port {})", id, port);
             stop_port(port);
-            running.remove(&id);
+            workers.remove(&id);
         }
 
         std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
     }
+}
+
+/// Health snapshot parsed from a worker's `GET /healthz`.
+struct Health {
+    bytes_sent: u64,
+}
+
+/// Poll `http://127.0.0.1:<port>/healthz`; returns None if unreachable/unparseable.
+fn poll_health(port: u16) -> Option<Health> {
+    let url = format!("http://127.0.0.1:{port}/healthz");
+    let out = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "3", &url])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Minimal JSON scrape (no serde dep): find "bytes_sent": N.
+    let bytes_sent = extract_u64(&text, "\"bytes_sent\":")?;
+    Some(Health { bytes_sent })
+}
+
+/// Extract the integer following `key` in `s` (tiny, dependency-free JSON scrape).
+fn extract_u64(s: &str, key: &str) -> Option<u64> {
+    let i = s.find(key)? + key.len();
+    let rest = &s[i..];
+    let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Stop the single engine listening on `port` (used when a session's game ends).
@@ -508,9 +614,10 @@ fn write_config_file(exe: &str, cfg: &Config) -> Result<()> {
         crate::cli::Source::Orchestration => "orchestration",
     };
     let body = format!(
-        "base_port={}\npublic_ip={}\nengine={}\nwidth={}\nheight={}\nfps={}\nbitrate={}\nuser_pattern={}\nlog_dir={}\nsource={}\nconfig_root={}\n",
+        "base_port={}\npublic_ip={}\nengine={}\nwidth={}\nheight={}\nfps={}\nbitrate={}\nuser_pattern={}\nlog_dir={}\nsource={}\nconfig_root={}\nmax_broadcasts={}\n",
         cfg.base_port, cfg.public_ip.clone().unwrap_or_default(), cfg.engine, cfg.width,
         cfg.height, cfg.fps, cfg.bitrate, cfg.user_pattern, cfg.log_dir, source, cfg.config_root,
+        cfg.max_broadcasts,
     );
     std::fs::write(config_path(exe), body).context("write manager-config.txt")?;
     Ok(())
@@ -540,6 +647,7 @@ fn load_config_file(base: &Config) -> Config {
                 crate::cli::Source::Orchestration
             },
             "config_root" => cfg.config_root = v,
+            "max_broadcasts" => if let Ok(x) = v.parse() { cfg.max_broadcasts = x },
             "width" => if let Ok(x) = v.parse() { cfg.width = x },
             "height" => if let Ok(x) = v.parse() { cfg.height = x },
             "fps" => if let Ok(x) = v.parse() { cfg.fps = x },
