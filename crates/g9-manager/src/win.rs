@@ -105,12 +105,64 @@ fn primary_local_ipv4() -> Option<String> {
 /// Mirrors the idle-watchdog / .rhino_apikey per-session config pattern. The file's
 /// mere presence means "an active session wants to be broadcast"; teardown removes it.
 pub fn session_has_broadcast_config(cfg: &Config, user: &str) -> bool {
-    let path = format!(
+    broadcast_config_path(cfg, user).is_file()
+}
+
+fn broadcast_config_path(cfg: &Config, user: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
         "{}\\{}\\broadcast.json",
         cfg.config_root.trim_end_matches('\\'),
         user
-    );
-    std::path::Path::new(&path).is_file()
+    ))
+}
+
+/// Per-session broadcast parameters that session-api writes into broadcast.json.
+/// When `sfu_whip_base` is present, the worker publishes to the SFU via WHIP for
+/// room `session-<sessionId>`; otherwise it falls back to direct serving.
+#[derive(Default)]
+pub struct BroadcastConfig {
+    pub session_id: String,
+    pub sfu_whip_base: Option<String>, // e.g. http://46.232.234.68:8889
+    pub whip_token: Option<String>,
+}
+
+impl BroadcastConfig {
+    /// The SFU room name for this session (what viewers' WHEP URL also uses).
+    pub fn room(&self) -> String {
+        format!("session-{}", self.session_id)
+    }
+    /// Full WHIP publish URL, if the SFU base is set.
+    pub fn whip_url(&self) -> Option<String> {
+        self.sfu_whip_base
+            .as_ref()
+            .map(|b| format!("{}/{}/whip", b.trim_end_matches('/'), self.room()))
+    }
+}
+
+/// Read + minimally-parse a session's broadcast.json (dependency-free scrape of the
+/// string fields we need). Returns a default (empty) config if absent/unparseable.
+pub fn read_broadcast_config(cfg: &Config, user: &str) -> BroadcastConfig {
+    let mut bc = BroadcastConfig::default();
+    let text = match std::fs::read_to_string(broadcast_config_path(cfg, user)) {
+        Ok(t) => t,
+        Err(_) => return bc,
+    };
+    bc.session_id = json_str(&text, "sessionId").unwrap_or_default();
+    bc.sfu_whip_base = json_str(&text, "sfuWhipBase").filter(|s| !s.is_empty());
+    bc.whip_token = json_str(&text, "whipToken").filter(|s| !s.is_empty());
+    bc
+}
+
+/// Extract a JSON string value for `key` (tiny scrape; handles "key": "value").
+fn json_str(s: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let i = s.find(&pat)? + pat.len();
+    let rest = &s[i..];
+    let colon = rest.find(':')? + 1;
+    let after = rest[colon..].trim_start();
+    let after = after.strip_prefix('"')?;
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
 }
 
 /// Should this session be broadcast, per the configured source?
@@ -218,12 +270,23 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     //   - lpApplicationName = engine path (no shell),
     //   - G9_PUBLIC_IP injected into the user's environment block,
     //   - stdout/stderr redirected to the per-session log via STARTUPINFO handles.
-    let cmdline = format!(
-        "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
-         --fps {fps} --bitrate {br} --audio true",
-        engine = cfg.engine, port = port, w = cfg.width, h = cfg.height,
-        fps = cfg.fps, br = cfg.bitrate,
-    );
+    // If the session's broadcast.json names an SFU, publish via WHIP (production:
+    // encode once, SFU fans out). Otherwise serve browsers directly (dev/LAN).
+    let bc = read_broadcast_config(cfg, &session.user);
+    let cmdline = match bc.whip_url() {
+        Some(whip_url) => format!(
+            "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
+             --fps {fps} --bitrate {br} --audio true",
+            engine = cfg.engine, whip = whip_url, w = cfg.width, h = cfg.height,
+            fps = cfg.fps, br = cfg.bitrate,
+        ),
+        None => format!(
+            "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
+             --fps {fps} --bitrate {br} --audio true",
+            engine = cfg.engine, port = port, w = cfg.width, h = cfg.height,
+            fps = cfg.fps, br = cfg.bitrate,
+        ),
+    };
 
     unsafe {
         // Session user token → process runs in that session/desktop.
@@ -240,6 +303,10 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         let mut env_vec = build_env_with(env, "G9_PUBLIC_IP", &public_ip);
         if have_env && !env.is_null() {
             let _ = DestroyEnvironmentBlock(env);
+        }
+        // Pass the WHIP publish token via env (kept off the command line / logs).
+        if let Some(tok) = bc.whip_token.as_ref() {
+            env_vec = add_env_var(env_vec, "G9_WHIP_TOKEN", tok);
         }
 
         // Inheritable log file handle for stdout+stderr.
@@ -295,6 +362,32 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         let _ = CloseHandle(pi.hProcess);
         Ok(pid)
     }
+}
+
+/// Append/override a var in an already-built UTF-16 double-null env block.
+fn add_env_var(block: Vec<u16>, name: &str, value: &str) -> Vec<u16> {
+    // Split the existing block into entries (strip the trailing double-null).
+    let mut entries: Vec<Vec<u16>> = Vec::new();
+    let mut cur: Vec<u16> = Vec::new();
+    for &w in &block {
+        if w == 0 {
+            if !cur.is_empty() {
+                entries.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(w);
+        }
+    }
+    let upper = format!("{}=", name).to_ascii_uppercase();
+    entries.retain(|e| !String::from_utf16_lossy(e).to_ascii_uppercase().starts_with(&upper));
+    entries.push(format!("{name}={value}").encode_utf16().collect());
+    let mut out: Vec<u16> = Vec::new();
+    for e in entries {
+        out.extend_from_slice(&e);
+        out.push(0);
+    }
+    out.push(0);
+    out
 }
 
 /// Copy the user's environment block (double-null-terminated UTF-16 "NAME=VALUE"
