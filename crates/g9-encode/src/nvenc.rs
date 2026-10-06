@@ -49,6 +49,7 @@ pub struct NvencEncoder {
     width: u32,
     height: u32,
     cached_params: Option<g9_core::frame::ParameterSets>,
+    logged_sps: bool,
 }
 
 impl NvencEncoder {
@@ -188,6 +189,7 @@ impl NvencEncoder {
                 width: init.encodeWidth,
                 height: init.encodeHeight,
                 cached_params: None,
+                logged_sps: false,
             })
         }
     }
@@ -286,6 +288,19 @@ impl NvencEncoder {
             let is_key = contains_idr(&annexb);
             if is_key {
                 if let Some(ps) = extract_parameter_sets(&annexb) {
+                    // One-time: log the actual SPS profile_idc / level so we can
+                    // confirm the bitstream matches the SDP profile-level-id the
+                    // browser negotiated (must share profile_idc + constraint byte,
+                    // i.e. the first two SPS bytes, or the browser decodes nothing).
+                    if !self.logged_sps {
+                        tracing::info!(
+                            target: "g9::nvenc",
+                            "SPS: profile_idc={} constraint=0x{:02x} level_idc={} -> profile-level-id={:02x}{:02x}{:02x} (SDP must share the first two bytes)",
+                            ps.profile_idc, ps.profile_compat, ps.level_idc,
+                            ps.profile_idc, ps.profile_compat, ps.level_idc
+                        );
+                        self.logged_sps = true;
+                    }
                     self.cached_params = Some(ps);
                 }
             }

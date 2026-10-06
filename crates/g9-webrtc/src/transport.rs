@@ -99,8 +99,14 @@ impl WebRtcTransport {
                     mime_type: MIME_TYPE_H264.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
+                    // Must match what NVENC actually emits, or the browser decodes
+                    // nothing (bytes arrive but framesDecoded stays 0 -> black).
+                    // NVENC is configured for H.264 High profile (profile_idc=100 =
+                    // 0x64). 1080p60 needs level >= 4.2 (0x2a); baseline level 3.1
+                    // (42e01f) was both the wrong profile AND too low a level for
+                    // 1080p. 64002a = High profile, level 4.2.
                     sdp_fmtp_line:
-                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a"
                             .to_owned(),
                     // Negotiate RTCP feedback so the browser can request a keyframe
                     // (PLI / FIR) and report loss (NACK). Without this the viewer has
