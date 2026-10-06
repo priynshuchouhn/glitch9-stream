@@ -142,22 +142,28 @@ impl WebRtcTransport {
         // Accept ALL interfaces when gathering host candidates, including loopback.
         se.set_interface_filter(Box::new(|_name: &str| -> bool { true }));
 
-        // The browser's own candidates are useless to us here: Chrome hides its host
-        // IP behind an mDNS `.local` name (webrtc-rs can't resolve it) and external
-        // STUN is blocked on this VM. WebRTC only needs ONE working pair, so we make
-        // the ENGINE advertise a reachable host candidate that the browser connects
-        // to. `set_nat_1to1_ips` forces our host candidate to use the given IP(s).
-        // Defaults to loopback (same-machine viewer); set G9_PUBLIC_IP for LAN/remote.
-        let ips: Vec<String> = match std::env::var("G9_PUBLIC_IP") {
-            Ok(v) if !v.trim().is_empty() => {
-                v.split(',').map(|s| s.trim().to_string()).collect()
+        // The browser's own candidates are useless to us: Chrome hides its host IP
+        // behind an mDNS `.local` name (webrtc-rs can't resolve it) and external STUN
+        // is blocked on this VM. WebRTC only needs ONE working pair, so the browser
+        // connects to a host candidate WE advertise.
+        //
+        // IMPORTANT: `set_nat_1to1_ips` only REWRITES the advertised address; it does
+        // not move the UDP socket. For same-machine viewers we must gather a REAL
+        // loopback candidate (socket actually bound to 127.0.0.1) so the browser's
+        // STUN connectivity check reaches a listening socket. The interface filter
+        // above already allows loopback, so we gather it for free. We ONLY use
+        // nat_1to1 when an explicit public IP is given (LAN/remote), where the socket
+        // binds to a real NIC and we just need to advertise the routable address.
+        if let Ok(v) = std::env::var("G9_PUBLIC_IP") {
+            let ips: Vec<String> = v.split(',').map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()).collect();
+            if !ips.is_empty() {
+                se.set_nat_1to1_ips(
+                    ips,
+                    webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+                );
             }
-            _ => vec!["127.0.0.1".to_string()],
-        };
-        se.set_nat_1to1_ips(
-            ips,
-            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
-        );
+        }
 
         Ok(APIBuilder::new()
             .with_media_engine(m)
