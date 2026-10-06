@@ -351,6 +351,16 @@ fn video_loop(
 
     tracing::info!("video pipeline running: {} encoder(s)", encoders.len());
 
+    // Frame-rate limiter. DXGI presents at the display's native rate (often 60-75fps
+    // on this VM), but NVENC is configured for cfg.fps and its CBR is sized for that
+    // rate. If we encode EVERY captured frame, we feed NVENC ~2x its declared rate,
+    // so the real bitrate overshoots the target (seen as 6.6 Mbps when 3 Mbps was
+    // requested) and a remote viewer drops ~40-60% of packets -> black. Throttle to
+    // the configured fps by skipping frames that arrive before the next frame slot.
+    let target_fps = cfg.fps.max(1);
+    let frame_interval = Duration::from_secs_f64(1.0 / target_fps as f64);
+    let mut next_frame_at = std::time::Instant::now();
+
     let mut geometry_checked = false;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -370,6 +380,15 @@ fn video_loop(
         };
         metrics.capture_latency.observe(t_cap.elapsed());
         PipelineCounters::inc(&metrics.counters.frames_captured);
+
+        // Rate-limit: if this frame arrived before its slot, drop it (don't encode).
+        // We still counted the capture above (for capture-fps visibility) but skip
+        // convert+encode so the encoder stays at the configured fps.
+        let now = std::time::Instant::now();
+        if now < next_frame_at {
+            continue;
+        }
+        next_frame_at = now + frame_interval;
 
         // One-time geometry sanity check. The NV12 converter was initialized for
         // cfg.width x cfg.height, but DXGI captures the display's ACTUAL size. If
