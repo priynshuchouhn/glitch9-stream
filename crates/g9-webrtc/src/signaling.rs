@@ -21,8 +21,27 @@ use tokio_tungstenite::tungstenite::Message;
 /// The browser viewer, embedded at compile time (served over plain HTTP GET).
 const VIEWER_HTML: &str = include_str!("../../../web/index.html");
 
-/// Write a minimal HTTP/1.1 response carrying the viewer page.
-async fn serve_viewer_page(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+/// Serve the viewer page over HTTP/1.1. We must DRAIN the request first: on Windows,
+/// closing a socket that still has unread inbound data triggers a TCP RST, which
+/// truncates our response and leaves the browser with a blank page. So we read the
+/// request headers, write the response, flush, then shut down the write half cleanly.
+async fn serve_viewer_page(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Drain the request headers (read until the blank line, bounded).
+    let mut buf = [0u8; 2048];
+    let mut total = 0usize;
+    loop {
+        let n = stream.read(&mut buf[total..]).await?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") || total == buf.len() {
+            break;
+        }
+    }
+
     let body = VIEWER_HTML.as_bytes();
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -30,7 +49,10 @@ async fn serve_viewer_page(stream: &mut tokio::net::TcpStream) -> std::io::Resul
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body).await?;
-    stream.flush().await
+    stream.flush().await?;
+    // Graceful close so the browser reads the full body before FIN.
+    let _ = stream.shutdown().await;
+    Ok(())
 }
 use webrtc::api::API;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -96,7 +118,9 @@ impl SignalingServer {
                     }
                 } else {
                     // Serve the embedded viewer page for any plain HTTP GET.
-                    let _ = serve_viewer_page(&mut stream).await;
+                    if let Err(e) = serve_viewer_page(stream).await {
+                        tracing::debug!(target: "g9::webrtc", "serve viewer page: {e}");
+                    }
                 }
             });
         }
