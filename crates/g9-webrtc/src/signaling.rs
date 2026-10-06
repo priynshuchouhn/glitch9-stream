@@ -174,6 +174,14 @@ impl SignalingServer {
             tracing::info!(target: "g9::webrtc", "peer connection state: {s}");
             Box::pin(async {})
         }));
+        pc.on_ice_connection_state_change(Box::new(|s| {
+            tracing::info!(target: "g9::webrtc", "ICE connection state: {s}");
+            Box::pin(async {})
+        }));
+        pc.on_ice_gathering_state_change(Box::new(|s| {
+            tracing::info!(target: "g9::webrtc", "ICE gathering state: {s}");
+            Box::pin(async {})
+        }));
 
         self.viewers.fetch_add(1, Ordering::Relaxed);
         // Ask the engine to force an IDR so this viewer decodes immediately.
@@ -190,6 +198,7 @@ impl SignalingServer {
             Box::pin(async move {
                 if let Some(c) = c {
                     if let Ok(j) = c.to_json() {
+                        tracing::info!(target: "g9::webrtc", "local ICE candidate: {}", j.candidate);
                         if let Ok(txt) = serde_json::to_string(&SignalMessage::Candidate {
                             candidate: j.candidate,
                             sdp_mid: j.sdp_mid,
@@ -246,6 +255,7 @@ impl SignalingServer {
                             }
                         }
                         SignalMessage::Candidate { candidate, sdp_mid, sdp_mline_index } => {
+                            tracing::info!(target: "g9::webrtc", "remote ICE candidate: {candidate}");
                             use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
                             let init = RTCIceCandidateInit {
                                 candidate,
@@ -253,7 +263,9 @@ impl SignalingServer {
                                 sdp_mline_index,
                                 username_fragment: None,
                             };
-                            pc.add_ice_candidate(init).await.ok();
+                            if let Err(e) = pc.add_ice_candidate(init).await {
+                                tracing::warn!(target: "g9::webrtc", "add_ice_candidate: {e}");
+                            }
                         }
                         SignalMessage::Answer { .. } => { /* engine is the answerer */ }
                     }
