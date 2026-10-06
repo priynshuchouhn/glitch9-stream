@@ -26,7 +26,6 @@ use tokio::sync::mpsc;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::rtp_transceiver::rtp_codec::{
@@ -141,10 +140,24 @@ impl WebRtcTransport {
             webrtc::ice::network_type::NetworkType::Udp6,
         ]);
         // Accept ALL interfaces when gathering host candidates, including loopback.
-        // webrtc-ice excludes loopback by default, which blocks a browser on
-        // 127.0.0.1 from pairing with us (ICE → failed). Accepting every interface
-        // yields a usable host candidate for same-machine and LAN viewers.
         se.set_interface_filter(Box::new(|_name: &str| -> bool { true }));
+
+        // The browser's own candidates are useless to us here: Chrome hides its host
+        // IP behind an mDNS `.local` name (webrtc-rs can't resolve it) and external
+        // STUN is blocked on this VM. WebRTC only needs ONE working pair, so we make
+        // the ENGINE advertise a reachable host candidate that the browser connects
+        // to. `set_nat_1to1_ips` forces our host candidate to use the given IP(s).
+        // Defaults to loopback (same-machine viewer); set G9_PUBLIC_IP for LAN/remote.
+        let ips: Vec<String> = match std::env::var("G9_PUBLIC_IP") {
+            Ok(v) if !v.trim().is_empty() => {
+                v.split(',').map(|s| s.trim().to_string()).collect()
+            }
+            _ => vec!["127.0.0.1".to_string()],
+        };
+        se.set_nat_1to1_ips(
+            ips,
+            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+        );
 
         Ok(APIBuilder::new()
             .with_media_engine(m)
@@ -242,13 +255,9 @@ impl MediaTransport for WebRtcTransport {
         let (video_track, audio_track) = self.spawn_writers();
 
         // Shared config for every viewer PeerConnection (STUN for ICE; no TURN POC).
-        let rtc_config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        // No STUN: it's blocked on the VM and we rely on the engine's host
+        // candidate (nat_1to1) instead. Empty ice_servers = host candidates only.
+        let rtc_config = RTCConfiguration::default();
 
         let server = crate::signaling::SignalingServer {
             bind_addr: self.bind_addr.clone(),

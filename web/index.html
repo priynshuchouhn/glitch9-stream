@@ -65,9 +65,9 @@
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
 
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-      });
+      // No STUN/TURN: the engine advertises a reachable host candidate (its own IP)
+      // and the browser connects to that. External STUN is blocked on the VM anyway.
+      const pc = new RTCPeerConnection({ iceServers: [] });
       // Expose for debugging from the console.
       window.pc = pc;
       pc.oniceconnectionstatechange = () => console.log('[ICE] connection state:', pc.iceConnectionState);
