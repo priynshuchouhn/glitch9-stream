@@ -335,10 +335,30 @@ glitch9-manager.exe stop
 ```
 
 Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
-5 engine processes (~55-60 MB each), all ports LIVE, GPU ENC ~16-23% total, VRAM
-~9.9 GB — comfortable headroom on the 24 GB card. Sessions with an active game
-capture at 60fps; idle sessions show 0fps (DXGI delivers no frames when nothing
-changes) and start automatically when motion appears.
+5 engine processes, all ports LIVE. Sessions with active content capture at
+~43-58fps; idle sessions show 0fps (DXGI delivers no frames when nothing changes)
+and start automatically when motion appears.
+
+**5-broadcast benchmark (shared with the live game + RhinoStream):**
+
+| Metric | 1 broadcast | 5 broadcasts |
+|--------|-------------|--------------|
+| GPU SM % | 58-66% | **95-96%** (near saturation) |
+| NVENC ENC % | 10-15% | **31-40%** |
+| VRAM | ~8.8 GB | **~14.4 GB** / 24 GB |
+| Engine RAM (total) | 61 MB | **~325 MB** (5× ~65 MB) |
+| Encode latency | ~7 ms | **~9-12 ms** (GPU contention) |
+| Actively-encoding sessions | 1 | 3 (others idle→0fps) |
+
+Takeaway: ~5 broadcasts is viable on this card but near its ceiling — at 95% SM
+with 3 active encoders *plus* the game *plus* RhinoStream, encode latency rises
+from ~7ms to ~12ms. More concurrent *active* broadcasts would need a second GPU
+(the VM has two) or lower per-stream settings (720p / lower fps). Idle sessions
+cost almost nothing (no frames captured).
+
+Firewall: broadcast ports need opening — `netsh advfirewall firewall add rule
+name="glitch9-broadcast-tcp" dir=in action=allow protocol=TCP localport=8080-8090
+profile=any` (UDP for ICE is covered by the per-program `glitch9-stream-udp` rule).
 
 ```bat
 REM run the manager as SYSTEM (service, or via PsExec -s for testing):
