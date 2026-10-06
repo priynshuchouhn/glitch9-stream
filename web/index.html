@@ -100,9 +100,15 @@
       ws.onmessage = async (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'answer') {
+          console.log('[ICE] got answer, setting remote description');
           await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
         } else if (msg.type === 'candidate') {
-          try { await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex }); } catch {}
+          console.log('[ICE] remote candidate from engine:', msg.candidate);
+          try {
+            await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex });
+          } catch (e) {
+            console.warn('[ICE] addIceCandidate failed:', e.message);
+          }
         }
       };
 

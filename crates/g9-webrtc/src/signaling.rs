@@ -245,13 +245,23 @@ impl SignalingServer {
                                 Ok(a) => a,
                                 Err(e) => { tracing::error!(target: "g9::webrtc", "create_answer: {e}"); continue; }
                             };
-                            if let Err(e) = pc.set_local_description(answer.clone()).await {
+                            // Non-trickle: gather ALL candidates, then send the answer
+                            // with them embedded in the SDP. This avoids trickle
+                            // timing/relay races (the browser gets our 127.0.0.1 host
+                            // candidate inline, guaranteed, before it starts checking).
+                            let mut gather_done = pc.gathering_complete_promise().await;
+                            if let Err(e) = pc.set_local_description(answer).await {
                                 tracing::error!(target: "g9::webrtc", "set_local_description: {e}"); continue;
                             }
-                            let txt = serde_json::to_string(&SignalMessage::Answer { sdp: answer.sdp })
+                            let _ = gather_done.recv().await;
+                            let final_sdp = match pc.local_description().await {
+                                Some(d) => d.sdp,
+                                None => { tracing::error!(target: "g9::webrtc", "no local description after gather"); continue; }
+                            };
+                            let txt = serde_json::to_string(&SignalMessage::Answer { sdp: final_sdp })
                                 .unwrap_or_default();
                             if ws_tx.send(Message::Text(txt)).await.is_ok() {
-                                tracing::info!(target: "g9::webrtc", "sent SDP answer");
+                                tracing::info!(target: "g9::webrtc", "sent SDP answer (non-trickle, candidates embedded)");
                             }
                         }
                         SignalMessage::Candidate { candidate, sdp_mid, sdp_mline_index } => {
