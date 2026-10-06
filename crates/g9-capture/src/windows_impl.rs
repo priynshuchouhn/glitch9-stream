@@ -344,7 +344,9 @@ impl Capturer {
             staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             staging_desc.MiscFlags = 0;
 
-            let mut staging: Option<ID3D11Texture2D> = None;
+            let mut staging: Option<
+                windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+            > = None;
             ctx.device()
                 .CreateTexture2D(&staging_desc, None, Some(&mut staging))
                 .map_err(|e| Error::capture(format!("CreateTexture2D(staging): {e}")))?;
