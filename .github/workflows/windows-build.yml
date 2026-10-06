@@ -13,6 +13,7 @@ name: windows-build
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]                 # version tags publish a release artifact
   workflow_dispatch: {}          # allow manual runs
 
 jobs:
@@ -58,10 +59,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target\x86_64-pc-windows-msvc\release\glitch9-stream.exe" dist\
-          Copy-Item -Recurse "web" dist\web
-          Copy-Item -Recurse "docs" dist\docs
+          Copy-Item "target\x86_64-pc-windows-msvc\release\glitch9-stream.exe"  dist\
+          Copy-Item "target\x86_64-pc-windows-msvc\release\glitch9-manager.exe" dist\
+          Copy-Item -Recurse "web"     dist\web
+          Copy-Item -Recurse "docs"    dist\docs
           Copy-Item -Recurse "scripts" dist\scripts
+          # Deploy bundle the vm-agent can download+extract: a single zip with both
+          # binaries + the viewer. Named with the commit sha for traceability.
+          $sha = "$env:GITHUB_SHA".Substring(0,7)
+          Compress-Archive -Path dist\* -DestinationPath "glitch9-stream-$sha.zip" -Force
+          Copy-Item "glitch9-stream-$sha.zip" dist\glitch9-stream.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -70,3 +77,11 @@ jobs:
           path: dist
           if-no-files-found: error
           retention-days: 14
+
+      # On a version tag, also publish a GitHub Release with the deploy zip so the
+      # vm-agent /update-broadcast endpoint can pull a stable, versioned artifact.
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/glitch9-stream.zip
