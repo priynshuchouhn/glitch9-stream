@@ -9,14 +9,19 @@ use std::ffi::c_void;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, CREATE_ALWAYS, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_ATTRIBUTE_NORMAL,
+};
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
     WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW, WTSQueryUserToken,
-    WTSUserName, WTS_CONNECTSTATE_CLASS, WTSActive, WTS_SESSION_INFOW, WTS_CURRENT_SERVER_HANDLE,
+    WTSUserName, WTSActive, WTS_SESSION_INFOW, WTS_CURRENT_SERVER_HANDLE,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 /// Enumerate Active sessions whose username matches the configured pattern.
@@ -89,54 +94,64 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     let port = session.port(cfg.base_port);
     let dir = cfg.log_dir.trim_end_matches('\\');
     let log = format!("{dir}\\session-{}.log", session.id);
-    let bat = format!("{dir}\\_launch-{}.bat", session.id);
 
-    // Inline command lines with &&/> redirection are fragile through
-    // CreateProcessAsUserW. Write a tiny per-session .bat and run `cmd /c <bat>`
-    // instead — robust quoting, and the .bat sets the env + redirects to the log.
-    let bat_contents = format!(
-        "@echo off\r\n\
-         set G9_PUBLIC_IP={ip}\r\n\
-         \"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
-         --fps {fps} --bitrate {br} --audio true > \"{log}\" 2>&1\r\n",
-        ip = cfg.public_ip,
-        engine = cfg.engine,
-        port = port,
-        w = cfg.width,
-        h = cfg.height,
-        fps = cfg.fps,
-        br = cfg.bitrate,
-        log = log,
+    // Launch the ENGINE DIRECTLY — not via cmd.exe. On locked-down gaming hosts,
+    // group policy / AppLocker often blocks cmd.exe for gamer accounts (observed:
+    // 0x800704EC "blocked by group policy"), but the engine .exe is allowed. So:
+    //   - lpApplicationName = engine path (no shell),
+    //   - G9_PUBLIC_IP injected into the user's environment block,
+    //   - stdout/stderr redirected to the per-session log via STARTUPINFO handles.
+    let cmdline = format!(
+        "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
+         --fps {fps} --bitrate {br} --audio true",
+        engine = cfg.engine, port = port, w = cfg.width, h = cfg.height,
+        fps = cfg.fps, br = cfg.bitrate,
     );
-    std::fs::write(&bat, bat_contents).with_context(|| format!("write {bat}"))?;
-
-    let cmdline = format!("cmd.exe /c \"{bat}\"");
 
     unsafe {
-        // Get the session's user token so the process runs in that session/desktop.
+        // Session user token → process runs in that session/desktop.
         let mut token: HANDLE = HANDLE::default();
         WTSQueryUserToken(session.id, &mut token)
             .with_context(|| format!("WTSQueryUserToken(session {})", session.id))?;
 
-        // Build the user's environment block (so the engine sees the right env).
+        // Environment block for the user, then force G9_PUBLIC_IP into it. The block
+        // is a double-null-terminated list of "NAME=VALUE\0"; we rebuild it with our
+        // var appended.
         let mut env: *mut c_void = std::ptr::null_mut();
         let have_env = CreateEnvironmentBlock(&mut env, token, false).is_ok();
+        let mut env_vec = build_env_with(env, "G9_PUBLIC_IP", &cfg.public_ip);
+        if have_env && !env.is_null() {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+
+        // Inheritable log file handle for stdout+stderr.
+        let mut sa = SECURITY_ATTRIBUTES::default();
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.bInheritHandle = true.into();
+        let log_w: Vec<u16> = log.encode_utf16().chain(std::iter::once(0)).collect();
+        let log_handle = CreateFileW(
+            PCWSTR(log_w.as_ptr()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            Some(&sa),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            HANDLE::default(),
+        )
+        .with_context(|| format!("CreateFileW({log})"))?;
 
         let mut cmd_utf16: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
         let mut si = STARTUPINFOW::default();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        // Target the interactive desktop of the session.
         let mut desktop: Vec<u16> = "winsta0\\default\0".encode_utf16().collect();
         si.lpDesktop = PWSTR(desktop.as_mut_ptr());
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = log_handle;
+        si.hStdError = log_handle;
         let mut pi = PROCESS_INFORMATION::default();
 
-        // Working directory = log/root dir (so relative paths resolve sanely).
-        let mut cwd_utf16: Vec<u16> = cfg
-            .log_dir
-            .trim_end_matches('\\')
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let mut cwd_utf16: Vec<u16> =
+            dir.encode_utf16().chain(std::iter::once(0)).collect();
 
         let flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
         let result = CreateProcessAsUserW(
@@ -145,17 +160,15 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
             PWSTR(cmd_utf16.as_mut_ptr()),
             None,
             None,
-            false,
+            true, // inherit handles (the log file)
             flags,
-            if have_env { Some(env) } else { None },
+            Some(env_vec.as_mut_ptr() as *const c_void),
             PCWSTR(cwd_utf16.as_mut_ptr()),
             &si,
             &mut pi,
         );
 
-        if have_env && !env.is_null() {
-            let _ = DestroyEnvironmentBlock(env);
-        }
+        let _ = CloseHandle(log_handle);
         let _ = CloseHandle(token);
 
         result.with_context(|| format!("CreateProcessAsUserW(session {})", session.id))?;
@@ -164,6 +177,44 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         let _ = CloseHandle(pi.hProcess);
         Ok(pid)
     }
+}
+
+/// Copy the user's environment block (double-null-terminated UTF-16 "NAME=VALUE"
+/// entries) and append/override `name=value`. Returns a fresh double-null block.
+unsafe fn build_env_with(env: *mut c_void, name: &str, value: &str) -> Vec<u16> {
+    let mut entries: Vec<Vec<u16>> = Vec::new();
+    if !env.is_null() {
+        let p = env as *const u16;
+        let mut i = 0isize;
+        loop {
+            // Read one null-terminated entry.
+            let start = i;
+            while *p.offset(i) != 0 {
+                i += 1;
+            }
+            if i == start {
+                break; // empty entry => end of block
+            }
+            let len = (i - start) as usize;
+            let slice = std::slice::from_raw_parts(p.offset(start), len);
+            entries.push(slice.to_vec());
+            i += 1; // skip the null
+        }
+    }
+    let upper = format!("{}=", name).to_ascii_uppercase();
+    entries.retain(|e| {
+        let s = String::from_utf16_lossy(e);
+        !s.to_ascii_uppercase().starts_with(&upper)
+    });
+    entries.push(format!("{name}={value}").encode_utf16().collect());
+
+    let mut block: Vec<u16> = Vec::new();
+    for e in entries {
+        block.extend_from_slice(&e);
+        block.push(0);
+    }
+    block.push(0); // final terminating null
+    block
 }
 
 pub fn start(cfg: &Config) -> Result<()> {

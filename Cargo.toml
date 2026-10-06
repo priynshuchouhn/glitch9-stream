@@ -69,6 +69,7 @@ features = [
     "Win32_System_RemoteDesktop",   # WTSEnumerateSessions / WTSQueryUserToken
     "Win32_System_Environment",     # CreateEnvironmentBlock
     "Win32_System_StationsAndDesktops",
+    "Win32_Storage_FileSystem",     # CreateFileW for the per-session log handle
 ]
 
 [profile.release]
