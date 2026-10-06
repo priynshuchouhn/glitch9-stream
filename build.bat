@@ -52,7 +52,17 @@ REM --- Optional: git pull ---
 echo.%*| findstr /i "pull" >nul
 if not errorlevel 1 (
     echo [build] git pull...
-    git pull || exit /b 1
+    REM Cargo.lock is tracked but cargo may rewrite it locally on Windows, which
+    REM makes `git pull` abort with "local changes would be overwritten". It's a
+    REM generated file, so discard any local churn before pulling. (Only Cargo.lock
+    REM is reset — your source edits are never touched.)
+    git checkout -- Cargo.lock 2>nul
+    git pull || (
+        echo [build] git pull FAILED. Resolve manually, then re-run.
+        exit /b 1
+    )
+    echo [build] now at:
+    git log --oneline -1
 )
 
 REM --- Build ---
