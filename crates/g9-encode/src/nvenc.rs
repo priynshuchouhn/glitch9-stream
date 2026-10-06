@@ -201,6 +201,8 @@ impl NvencEncoder {
                 )));
             }
 
+            let cur_bitrate_bps = profile.bitrate_bps;
+            let fps = profile.fps.max(1);
             Ok(Self {
                 _dll: dll,
                 api,
@@ -214,8 +216,8 @@ impl NvencEncoder {
                 height: init_box.encodeHeight,
                 cached_params: None,
                 logged_sps: false,
-                cur_bitrate_bps: profile.bitrate_bps,
-                fps: profile.fps.max(1),
+                cur_bitrate_bps,
+                fps,
                 config: config_box,
                 init: init_box,
             })
