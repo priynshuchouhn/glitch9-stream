@@ -491,6 +491,15 @@ pub fn start_system(base: &Config) -> Result<()> {
 /// Per-session worker tracking for the watchdog.
 #[derive(Default)]
 struct WorkerState {
+    /// PID of the launched engine. Used to health-check WHIP-publishing workers by
+    /// process liveness (they open no local port) and to stop them precisely.
+    pid: u32,
+
+    /// True when this worker publishes to the SFU via WHIP. WHIP workers run no
+    /// local signaling server / `/healthz`, so they are health-checked by process
+    /// liveness rather than by a listening port.
+    whip: bool,
+
     /// `bytes_sent` from the last /healthz poll (to detect a stalled encoder).
     last_bytes: u64,
     /// Consecutive polls where the worker was unhealthy (not listening, no /healthz,
@@ -535,45 +544,61 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                 continue;
             }
             let port = s.port(cfg.base_port);
-            let listening = port_listening(port);
-            let health = if listening { poll_health(port) } else { None };
+            // WHIP publishers run no local signaling server / `/healthz` and open no
+            // port — the engine pushes straight to the SFU. For those we judge health
+            // by process liveness. Only direct-serve (dev/LAN) workers expose a port.
+            let whip = read_broadcast_config(cfg, &s.user).whip_url().is_some();
 
             match workers.get_mut(&s.id) {
                 // Known worker — health-check it.
                 Some(st) => {
                     st.polls_since_spawn += 1;
-                    let healthy = match &health {
-                        Some(h) => {
-                            // Healthy if listening and bytes advanced, OR still within
-                            // the startup grace window (idle desktop = legit 0 bytes).
-                            let advanced = h.bytes_sent > st.last_bytes;
-                            st.last_bytes = h.bytes_sent;
-                            advanced || st.polls_since_spawn <= SPAWN_GRACE_POLLS
+                    let healthy = if st.whip {
+                        // WHIP: alive = the engine process is still running. A crashed
+                        // publisher's PID disappears, which triggers a restart below.
+                        process_alive(st.pid)
+                    } else {
+                        let listening = port_listening(port);
+                        match if listening { poll_health(port) } else { None } {
+                            Some(h) => {
+                                // Healthy if bytes advanced, OR still within the startup
+                                // grace window (idle desktop = legit 0 bytes).
+                                let advanced = h.bytes_sent > st.last_bytes;
+                                st.last_bytes = h.bytes_sent;
+                                advanced || st.polls_since_spawn <= SPAWN_GRACE_POLLS
+                            }
+                            None => false, // not listening / no /healthz = unhealthy
                         }
-                        None => false, // not listening / no /healthz = unhealthy
                     };
                     if healthy {
                         st.unhealthy_polls = 0;
                     } else {
                         st.unhealthy_polls += 1;
                         tracing::warn!(
-                            "worker session {} (port {}) unhealthy ({}/{}): listening={}",
-                            s.id, port, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD, listening
+                            "worker session {} (pid {}, whip={}) unhealthy ({}/{})",
+                            s.id, st.pid, st.whip, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD
                         );
                         if st.unhealthy_polls >= UNHEALTHY_RESTART_THRESHOLD {
                             tracing::error!(
-                                "worker session {} (port {}) unhealthy -> restarting", s.id, port
+                                "worker session {} unhealthy -> restarting", s.id
                             );
-                            stop_port(port);
+                            // Stop the old worker precisely (by PID for WHIP, by port
+                            // for direct) before relaunching, so we never stack engines.
+                            if st.whip { stop_pid(st.pid); } else { stop_port(port); }
                             std::thread::sleep(std::time::Duration::from_millis(500));
                             match launch_in_session(s, cfg) {
-                                Ok(pid) => tracing::info!(
-                                    "restarted broadcast {} (session {}) port {} [pid {}]",
-                                    s.user, s.id, port, pid
-                                ),
-                                Err(e) => tracing::error!("restart session {} failed: {e:#}", s.id),
+                                Ok(pid) => {
+                                    tracing::info!(
+                                        "restarted broadcast {} (session {}) [pid {}]",
+                                        s.user, s.id, pid
+                                    );
+                                    *st = WorkerState { pid, whip, ..Default::default() };
+                                }
+                                Err(e) => {
+                                    tracing::error!("restart session {} failed: {e:#}", s.id);
+                                    *st = WorkerState::default();
+                                }
                             }
-                            *st = WorkerState::default();
                         }
                     }
                 }
@@ -589,10 +614,10 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     match launch_in_session(s, cfg) {
                         Ok(pid) => {
                             tracing::info!(
-                                "session active -> broadcast {} (session {}) port {} [pid {}]",
-                                s.user, s.id, port, pid
+                                "session active -> broadcast {} (session {}) [pid {}] whip={}",
+                                s.user, s.id, pid, whip
                             );
-                            workers.insert(s.id, WorkerState::default());
+                            workers.insert(s.id, WorkerState { pid, whip, ..Default::default() });
                         }
                         Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
                     }
@@ -603,10 +628,11 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
         // Stop workers whose session ended (or vanished).
         let to_stop: Vec<u32> = workers.keys().copied().filter(|id| !active.contains(id)).collect();
         for id in to_stop {
-            let port = cfg.base_port.saturating_add(id as u16);
-            tracing::info!("session ended -> stopping broadcast for session {} (port {})", id, port);
-            stop_port(port);
-            workers.remove(&id);
+            if let Some(st) = workers.remove(&id) {
+                tracing::info!("session ended -> stopping broadcast for session {} (pid {})", id, st.pid);
+                // Stop by PID for WHIP workers (no port); by port for direct ones.
+                if st.whip { stop_pid(st.pid); } else { stop_port(cfg.base_port.saturating_add(id as u16)); }
+            }
         }
 
         std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
@@ -655,6 +681,39 @@ fn stop_port(port: u16) {
                 }
             }
         }
+    }
+}
+
+/// Stop a worker by PID. Used for WHIP publishers, which open no local port (so
+/// `stop_port` can't find them). `taskkill /t` also reaps any child the engine
+/// spawned. A zero/absent PID is a no-op.
+fn stop_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/pid", &pid.to_string(), "/t", "/f"])
+        .status();
+}
+
+/// Is the process with this PID still running? Used to health-check WHIP workers
+/// by liveness (they expose no `/healthz`). `tasklist` with a PID filter prints the
+/// image row when it exists; otherwise it prints an "INFO: No tasks" line.
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let out = std::process::Command::new("tasklist")
+        .args(["/fi", &format!("PID eq {pid}"), "/nh", "/fo", "csv"])
+        .output();
+    match out {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // A matching row is CSV-quoted ("glitch9-stream.exe","<pid>",...). The
+            // "no tasks" message is plain text, so a quote means the PID is live.
+            text.contains(&format!("\"{pid}\"")) || text.trim_start().starts_with('"')
+        }
+        Err(_) => false,
     }
 }
 
