@@ -299,6 +299,30 @@ Deployment requires launching the engine inside each target session as SYSTEM
 (matching the production RhinoStream model), fps-limited encoding for stable
 bitrate, and the corrected viewer track handling — all now in the codebase.
 
+### Multi-session broadcast (one broadcast per gamer session)
+
+glitch9-stream is the **spectator/broadcast** service running ALONGSIDE
+RhinoStream (which serves the player). Validated: RhinoStream and glitch9-stream
+capture the same session concurrently (DXGI Desktop Duplication supports multiple
+duplication clients) at only ~+2-4% NVENC added.
+
+Because duplication only captures its own session, broadcasting N sessions = N
+engine instances, one launched inside each session (SYSTEM, `PsExec -i <id>`) on
+its own port. `broadcast-manager.ps1` enumerates active gamer sessions, maps each
+to a deterministic port (BasePort + sessionId), and does start/stop/status.
+
+Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
+5 engine processes, GPU ENC ~16-23% total, VRAM ~9.9 GB — comfortable headroom
+on the 24 GB card. Sessions with an active game capture at 60fps; idle sessions
+show 0fps (DXGI delivers no frames when nothing changes) and start automatically
+when motion appears. Manager usage:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action start   # one engine per gamer session
+powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action status  # list sessions + LIVE ports
+powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action stop
+```
+
 ### Now also verified
 
 - **Audio:** WASAPI loopback capture → Opus → WebRTC, playing smoothly in the
