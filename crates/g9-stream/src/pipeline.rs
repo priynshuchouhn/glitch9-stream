@@ -176,9 +176,8 @@ fn audio_loop(
         actual_rate, actual_channels, audio_cfg.sample_rate, audio_cfg.channels
     );
     if actual_rate != 48000 {
-        tracing::warn!(
-            "WASAPI mix is {} Hz, not 48000 — Opus needs 48000; audio may be wrong \
-             pitch/speed until resampling is added",
+        tracing::info!(
+            "WASAPI mix is {} Hz; Opus encoder will resample to 48000 for WebRTC",
             actual_rate
         );
     }
