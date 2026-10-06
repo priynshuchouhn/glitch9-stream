@@ -7,9 +7,23 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals, dead_code)]
 
-// Pull in the generated bindings (structs, enums, GUID constants, fn-pointer table,
-// NvEncodeAPICreateInstance / NvEncodeAPIGetMaxSupportedVersion typedefs).
-include!(concat!(env!("OUT_DIR"), "/nvenc_bindings.rs"));
+// Pull in the generated bindings (structs, enums, GUID constants, fn-pointer table).
+// They live in a sub-module so we can blanket-allow the style lints the machine-
+// generated code trips (unused re-exports, and `unnecessary_transmutes` on newer
+// rustc). `unknown_lints` guards against an older toolchain not knowing the latter.
+#[allow(
+    non_snake_case,
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    unused_imports,
+    unknown_lints,
+    unnecessary_transmutes
+)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/nvenc_bindings.rs"));
+}
+pub use generated::*;
 
 use std::os::raw::c_int;
 

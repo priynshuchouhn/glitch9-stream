@@ -71,6 +71,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+# No debug info in release: also silences the libopus LNK4099 "PDB not found" linker
+# warnings from the prebuilt audiopus_sys objects, and shrinks the binary.
+debug = false
+strip = true
 
 [profile.dev]
 opt-level = 1
