@@ -16,8 +16,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
-    WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW, WTSQueryUserToken,
-    WTSUserName, WTSActive, WTS_SESSION_INFOW, WTS_CURRENT_SERVER_HANDLE,
+    WTSEnumerateProcessesW, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW,
+    WTSQueryUserToken, WTSUserName, WTSActive, WTS_PROCESS_INFOW, WTS_SESSION_INFOW,
+    WTS_CURRENT_SERVER_HANDLE,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
@@ -50,6 +51,54 @@ pub fn enumerate_gamer_sessions(cfg: &Config) -> Result<Vec<GamerSession>> {
     }
     out.sort_by_key(|s| s.id);
     Ok(out)
+}
+
+/// Processes that are part of the OS/shell/streaming infra, NOT a game. If a session
+/// has any process beyond these, we treat it as "a game is running". Lowercased.
+const INFRA_PROCESSES: &[&str] = &[
+    // Windows shell / session infrastructure
+    "explorer.exe", "svchost.exe", "sihost.exe", "taskhostw.exe", "rdpclip.exe",
+    "conhost.exe", "ctfmon.exe", "dllhost.exe", "shellhost.exe", "runtimebroker.exe",
+    "wwahost.exe", "dwm.exe", "csrss.exe", "winlogon.exe", "userinit.exe",
+    "fontdrvhost.exe", "searchhost.exe", "startmenuexperiencehost.exe",
+    "textinputhost.exe", "smartscreen.exe", "wmiprvse.exe", "audiodg.exe",
+    "applicationframehost.exe", "systemsettings.exe", "lsass.exe", "services.exe",
+    // Vendor/host agents + our own stack (never count these as a game)
+    "rhinostream.exe", "rhinostreamv2.exe", "glitch9-stream.exe", "glitch9-manager.exe",
+    "azurearcsystray.exe", "xboxstat.exe", "gigabytedownloadassistant.exe",
+    "mstsc.exe", "psexec64.exe", "psexesvc.exe", "cmd.exe", "powershell.exe",
+    "nvcontainer.exe", "nvidia web helper.exe", "nvdisplay.container.exe",
+];
+
+/// Does this session have an active game? True if it has any process that isn't
+/// known infrastructure. Enumerates processes server-wide (one WTS call) and filters
+/// to the session.
+pub fn session_has_game(session_id: u32) -> bool {
+    unsafe {
+        let mut info_ptr: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        if WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut info_ptr, &mut count)
+            .is_err()
+        {
+            return false;
+        }
+        let procs = std::slice::from_raw_parts(info_ptr, count as usize);
+        let mut found = false;
+        for p in procs {
+            if p.SessionId != session_id || p.pProcessName.is_null() {
+                continue;
+            }
+            if let Ok(name) = p.pProcessName.to_string() {
+                let name_l = name.to_ascii_lowercase();
+                if !INFRA_PROCESSES.contains(&name_l.as_str()) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        WTSFreeMemory(info_ptr as *mut c_void);
+        found
+    }
 }
 
 /// Read the username for a session (WTSUserName). Returns None if empty/unavailable.
@@ -254,6 +303,12 @@ pub fn start_system(base: &Config) -> Result<()> {
         return Ok(());
     }
     for s in &sessions {
+        // Only spawn a broadcast worker when the session actually has a game — don't
+        // burn a GPU encoder on an idle desktop.
+        if !session_has_game(s.id) {
+            tracing::info!("skip {} (session {}): no active game", s.user, s.id);
+            continue;
+        }
         match launch_in_session(s, cfg) {
             Ok(pid) => tracing::info!(
                 "started broadcast: {} (session {}) -> port {} [pid {}]  http://{}:{}/",
@@ -263,6 +318,74 @@ pub fn start_system(base: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Watch loop: continuously reconcile broadcast workers against active-game sessions.
+/// Spawns a worker when a session's game starts; stops it when the game exits. Runs
+/// until killed. Must be SYSTEM (same token requirement as start). Poll interval in
+/// seconds.
+pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
+    let cfg = &load_config_file(base);
+    tracing::info!(
+        "watch: reconciling broadcasts to active-game sessions every {}s (pattern {})",
+        interval_secs, cfg.user_pattern
+    );
+    // Track which session ids we currently have a worker for.
+    let mut running: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    loop {
+        let sessions = enumerate_gamer_sessions(cfg).unwrap_or_default();
+        let active: std::collections::HashSet<u32> = sessions
+            .iter()
+            .filter(|s| session_has_game(s.id))
+            .map(|s| s.id)
+            .collect();
+
+        // Spawn for newly-active sessions.
+        for s in &sessions {
+            if active.contains(&s.id) && !running.contains(&s.id) {
+                match launch_in_session(s, cfg) {
+                    Ok(pid) => {
+                        tracing::info!(
+                            "game started -> broadcast {} (session {}) port {} [pid {}]",
+                            s.user, s.id, s.port(cfg.base_port), pid
+                        );
+                        running.insert(s.id);
+                    }
+                    Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
+                }
+            }
+        }
+
+        // Stop workers whose game ended (or whose session vanished).
+        let to_stop: Vec<u32> = running.iter().copied().filter(|id| !active.contains(id)).collect();
+        for id in to_stop {
+            let port = cfg.base_port.saturating_add(id as u16);
+            tracing::info!("game ended -> stopping broadcast for session {} (port {})", id, port);
+            stop_port(port);
+            running.remove(&id);
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
+    }
+}
+
+/// Stop the single engine listening on `port` (used when a session's game ends).
+/// Finds the PID via netstat and kills it, so other sessions' workers keep running.
+fn stop_port(port: u16) {
+    let out = std::process::Command::new("netstat").arg("-ano").output();
+    if let Ok(out) = out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let needle = format!(":{} ", port);
+        for line in text.lines() {
+            if line.contains(&needle) && line.contains("LISTENING") {
+                if let Some(pid) = line.split_whitespace().last() {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/pid", pid, "/f"])
+                        .status();
+                }
+            }
+        }
+    }
 }
 
 /// Register a scheduled task that runs `glitch9-manager start-system` as SYSTEM, so
@@ -277,7 +400,10 @@ pub fn deploy(cfg: &Config) -> Result<()> {
     // then just `"<exe>" start-system`.
     write_config_file(&exe, cfg)?;
 
-    let tr = format!("\"{exe}\" start-system");
+    // The task runs `watch` as SYSTEM: it continuously spawns a broadcast worker
+    // when a session's game starts and stops it when the game exits. `start`
+    // (as any admin) just kicks this task; stopping the task stops the watcher.
+    let tr = format!("\"{exe}\" watch");
     let status = std::process::Command::new("schtasks")
         .args([
             "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "once", "/st", "00:00",
@@ -286,7 +412,10 @@ pub fn deploy(cfg: &Config) -> Result<()> {
         .status()
         .context("schtasks /create")?;
     if status.success() {
-        tracing::info!("deployed SYSTEM task '{TASK_NAME}'. Now `glitch9-manager start` works as a normal admin.");
+        tracing::info!(
+            "deployed SYSTEM task '{TASK_NAME}' (watch mode). `glitch9-manager start` \
+             launches the watcher; it then auto-manages one broadcast per active-game session."
+        );
         Ok(())
     } else {
         anyhow::bail!("schtasks /create failed (run deploy from an elevated admin shell)")
@@ -365,16 +494,19 @@ fn is_system() -> bool {
 }
 
 pub fn stop(_cfg: &Config) -> Result<()> {
-    // Kill all engine instances. Simple and sufficient: the engine binary name is
-    // unique to this service.
+    // End the watcher task first so it doesn't immediately respawn workers.
+    let _ = std::process::Command::new("schtasks")
+        .args(["/end", "/tn", TASK_NAME])
+        .status();
+    // Then kill all engine instances (the binary name is unique to this service).
     let status = std::process::Command::new("taskkill")
         .args(["/im", "glitch9-stream.exe", "/f"])
         .status()
         .context("spawn taskkill")?;
     if status.success() {
-        tracing::info!("stopped all broadcast engines");
+        tracing::info!("stopped watcher + all broadcast engines");
     } else {
-        tracing::info!("no running broadcast engines to stop");
+        tracing::info!("stopped watcher; no running broadcast engines");
     }
     Ok(())
 }

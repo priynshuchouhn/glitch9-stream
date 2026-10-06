@@ -57,6 +57,13 @@ pub enum Command {
     /// INTERNAL: the actual SYSTEM-side start, invoked by the scheduled task.
     /// (Equivalent to `start` but never tries to re-elevate.)
     StartSystem,
+    /// Run continuously (SYSTEM): spawn a broadcast worker when a session's game
+    /// starts and stop it when the game exits. The intended production mode.
+    Watch {
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
 }
 
 /// Resolved config shared by the platform implementations.

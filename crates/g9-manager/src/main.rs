@@ -43,6 +43,7 @@ fn main() -> anyhow::Result<()> {
             Command::Stop => win::stop(&cfg),
             Command::Deploy => win::deploy(&cfg),
             Command::Undeploy => win::undeploy(),
+            Command::Watch { interval } => win::watch(&cfg, interval),
         }
     }
     #[cfg(not(windows))]
