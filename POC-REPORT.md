@@ -314,12 +314,25 @@ the session's user token (`WTSQueryUserToken` + `CreateProcessAsUserW`) — no
 PsExec, no PowerShell. Deterministic port = `base_port + session_id`.
 
 Two hard-won deployment details:
-- The manager must run **as SYSTEM** (`WTSQueryUserToken` needs SE_TCB privilege;
-  only SYSTEM has it). Run it from a SYSTEM service or `PsExec -s`.
+- `WTSQueryUserToken` needs SE_TCB privilege (SYSTEM-only), so launching into other
+  sessions requires SYSTEM. To let a **plain admin (g9admin) deploy and operate**
+  without PsExec, the manager has a one-time `deploy` that registers a SYSTEM
+  scheduled task (`glitch9-broadcast`) running `start-system` with the persisted
+  config. Then `start` (as any admin) auto-triggers that task; it runs directly
+  when already SYSTEM. Verified: g9admin ran `deploy` then `start` and all 5
+  sessions went LIVE.
 - Gamer accounts are **blocked from running cmd.exe** by group policy
   (0x800704EC), so the manager launches the engine **.exe directly** — injecting
   `G9_PUBLIC_IP` into a rebuilt environment block and redirecting stdout/stderr to
-  the per-session log via an inheritable file handle.
+  the per-session log via an inheritable file handle (no shell).
+
+Operator flow (as g9admin, no SYSTEM shell / no PsExec):
+```bat
+glitch9-manager.exe deploy    REM one-time: register the SYSTEM task
+glitch9-manager.exe start     REM start one broadcast per gamer session
+glitch9-manager.exe status
+glitch9-manager.exe stop
+```
 
 Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
 5 engine processes (~55-60 MB each), all ports LIVE, GPU ENC ~16-23% total, VRAM
