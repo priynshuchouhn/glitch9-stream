@@ -70,6 +70,7 @@ features = [
     "Win32_System_Environment",     # CreateEnvironmentBlock
     "Win32_System_StationsAndDesktops",
     "Win32_Storage_FileSystem",     # CreateFileW for the per-session log handle
+    "Win32_System_Services",        # Windows service dispatcher (g9-manager)
 ]
 
 [profile.release]

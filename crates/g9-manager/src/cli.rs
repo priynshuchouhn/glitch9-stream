@@ -74,6 +74,15 @@ pub enum Command {
     Deploy,
     /// Remove the scheduled task created by `deploy`.
     Undeploy,
+    /// Install the broadcast watcher as an auto-start LocalSystem Windows service
+    /// (production). Persists config, then `sc create`. More robust than the
+    /// scheduled task: auto-starts on boot, restarts on failure.
+    InstallService,
+    /// Stop and remove the Windows service.
+    UninstallService,
+    /// INTERNAL: service entry point (invoked by the SCM). Runs the watch loop
+    /// under a minimal service control dispatcher.
+    RunService,
     /// INTERNAL: the actual SYSTEM-side start, invoked by the scheduled task.
     /// (Equivalent to `start` but never tries to re-elevate.)
     StartSystem,

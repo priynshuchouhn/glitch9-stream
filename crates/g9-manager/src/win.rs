@@ -668,6 +668,164 @@ pub fn undeploy() -> Result<()> {
     Ok(())
 }
 
+const SERVICE_NAME: &str = "Glitch9Broadcast";
+
+/// Install the watcher as an auto-start LocalSystem Windows service (production).
+/// Persists config next to the exe (so `run-service` loads identical settings),
+/// then registers via `sc create`. Must run elevated.
+pub fn install_service(cfg: &Config) -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let exe = exe.to_string_lossy().to_string();
+    write_config_file(&exe, cfg)?;
+
+    // binPath points the SCM at our run-service entry. Quote the exe path.
+    let bin = format!("\"{exe}\" run-service");
+    let create = std::process::Command::new("sc")
+        .args([
+            "create", SERVICE_NAME, "binPath=", &bin, "start=", "auto",
+            "obj=", "LocalSystem", "DisplayName=", "Glitch9 Broadcast Manager",
+        ])
+        .status()
+        .context("sc create")?;
+    if !create.success() {
+        // Already exists? Update the binPath instead.
+        let _ = std::process::Command::new("sc")
+            .args(["config", SERVICE_NAME, "binPath=", &bin, "start=", "auto"])
+            .status();
+    }
+    // Restart on failure (SCM auto-recovery): reset count daily, 5s/10s/30s backoff.
+    let _ = std::process::Command::new("sc")
+        .args(["failure", SERVICE_NAME, "reset=", "86400", "actions=", "restart/5000/restart/10000/restart/30000"])
+        .status();
+    let _ = std::process::Command::new("sc").args(["description", SERVICE_NAME,
+        "Spawns/stops glitch9-stream broadcast workers per active game session."]).status();
+    // Start it now.
+    let start = std::process::Command::new("sc").args(["start", SERVICE_NAME]).status();
+    tracing::info!(
+        "installed service '{SERVICE_NAME}' (auto-start, LocalSystem, auto-restart). start: {:?}",
+        start.map(|s| s.success()).unwrap_or(false)
+    );
+    Ok(())
+}
+
+pub fn uninstall_service() -> Result<()> {
+    let _ = std::process::Command::new("sc").args(["stop", SERVICE_NAME]).status();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = std::process::Command::new("taskkill").args(["/im", "glitch9-stream.exe", "/f"]).status();
+    let del = std::process::Command::new("sc").args(["delete", SERVICE_NAME]).status();
+    tracing::info!("uninstalled service '{SERVICE_NAME}': {:?}", del.map(|s| s.success()).unwrap_or(false));
+    Ok(())
+}
+
+// ── Minimal Windows service dispatcher ─────────────────────────────────────────
+// The SCM launches us with `run-service`; we register a control handler, report
+// RUNNING, run the watch loop on a thread, and on STOP flip a flag the loop checks.
+
+use std::sync::atomic::AtomicBool;
+static SERVICE_STOP: AtomicBool = AtomicBool::new(false);
+static mut STATUS_HANDLE: isize = 0;
+
+pub fn run_service() -> Result<()> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Services::{
+        StartServiceCtrlDispatcherW, SERVICE_TABLE_ENTRYW,
+    };
+    unsafe {
+        let mut name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let table = [
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: PWSTR(name.as_mut_ptr()),
+                lpServiceProc: Some(service_main),
+            },
+            SERVICE_TABLE_ENTRYW {
+                lpServiceName: PWSTR::null(),
+                lpServiceProc: None,
+            },
+        ];
+        // Blocks until the service stops. If not launched by the SCM (e.g. run from
+        // a console), this fails — fall back to running watch directly.
+        if StartServiceCtrlDispatcherW(table.as_ptr()).is_err() {
+            tracing::warn!("not started by SCM; running watch loop directly");
+            return watch(&load_config_file(&default_config()), 5);
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn service_ctrl_handler(control: u32) {
+    const SERVICE_CONTROL_STOP: u32 = 0x1;
+    const SERVICE_CONTROL_SHUTDOWN: u32 = 0x5;
+    if control == SERVICE_CONTROL_STOP || control == SERVICE_CONTROL_SHUTDOWN {
+        SERVICE_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+        set_service_state(3 /*STOP_PENDING*/, 0);
+    }
+}
+
+unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows::core::PWSTR) {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Services::RegisterServiceCtrlHandlerW;
+    let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    match RegisterServiceCtrlHandlerW(PCWSTR(name.as_ptr()), Some(service_ctrl_handler)) {
+        Ok(h) => STATUS_HANDLE = h.0 as isize,
+        Err(_) => return,
+    }
+    set_service_state(4 /*RUNNING*/, 0x1 | 0x4 /*ACCEPT_STOP|SHUTDOWN*/);
+
+    // Run the watch loop on a worker thread; poll the stop flag here.
+    let handle = std::thread::spawn(|| {
+        let base = default_config();
+        let _ = watch(&load_config_file(&base), 5);
+    });
+    while !SERVICE_STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // Stop requested: tear down workers and report stopped.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/im", "glitch9-stream.exe", "/f"])
+        .status();
+    set_service_state(1 /*STOPPED*/, 0);
+    let _ = handle; // detached; process is stopping
+}
+
+/// Report service state to the SCM.
+unsafe fn set_service_state(state: u32, controls: u32) {
+    use windows::Win32::System::Services::{
+        SetServiceStatus, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STATUS_CURRENT_STATE,
+        ENUM_SERVICE_TYPE,
+    };
+    if STATUS_HANDLE == 0 {
+        return;
+    }
+    let status = SERVICE_STATUS {
+        dwServiceType: ENUM_SERVICE_TYPE(0x10), // SERVICE_WIN32_OWN_PROCESS
+        dwCurrentState: SERVICE_STATUS_CURRENT_STATE(state),
+        dwControlsAccepted: controls,
+        dwWin32ExitCode: 0,
+        dwServiceSpecificExitCode: 0,
+        dwCheckPoint: 0,
+        dwWaitHint: 0,
+    };
+    let _ = SetServiceStatus(SERVICE_STATUS_HANDLE(STATUS_HANDLE as *mut _), &status);
+}
+
+/// A Config with just the defaults (used when the service loads persisted config).
+fn default_config() -> Config {
+    Config {
+        user_pattern: r"^gamer\d+$".to_string(),
+        base_port: 8080,
+        public_ip: None,
+        engine: r"C:\glitch9-stream\target\release\glitch9-stream.exe".to_string(),
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        bitrate: 3_000_000,
+        log_dir: r"C:\glitch9-stream".to_string(),
+        source: crate::cli::Source::Orchestration,
+        config_root: r"C:\glitch9-prod\configs".to_string(),
+        max_broadcasts: 4,
+    }
+}
+
 /// Are we running as the SYSTEM account? (SYSTEM's username is "SYSTEM" under the
 /// NT AUTHORITY domain.) Cheap check via whoami.
 fn is_system() -> bool {

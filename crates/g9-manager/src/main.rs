@@ -44,6 +44,9 @@ fn main() -> anyhow::Result<()> {
             Command::Deploy => win::deploy(&cfg),
             Command::Undeploy => win::undeploy(),
             Command::Watch { interval } => win::watch(&cfg, interval),
+            Command::InstallService => win::install_service(&cfg),
+            Command::UninstallService => win::uninstall_service(),
+            Command::RunService => win::run_service(),
         }
     }
     #[cfg(not(windows))]
