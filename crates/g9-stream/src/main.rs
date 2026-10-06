@@ -24,6 +24,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command() {
         Command::ListDisplays => cli::list_displays(),
+        Command::DumpFrame { display, path } => cli::dump_frame(display, &path),
         Command::Run(cfg) => {
             // Tokio runtime for the async transports + signaling.
             let rt = tokio::runtime::Builder::new_multi_thread()

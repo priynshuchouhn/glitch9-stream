@@ -303,6 +303,95 @@ impl Capturer {
     }
 }
 
+impl Capturer {
+    /// DEBUG ONLY: capture one real desktop frame and write it to a PPM file so we
+    /// can SEE what DXGI is actually grabbing (vs guessing why a stream is black).
+    /// This is the one place in the crate that reads pixels back to the CPU; it is
+    /// never on the streaming hot path. Returns the (width, height) written.
+    ///
+    /// We retry until we get a frame with a non-zero present time (so we don't dump
+    /// a cursor-only or empty update), then CopyResource into a CPU-readable staging
+    /// texture, Map it, and write BGRA->RGB as binary PPM (P6).
+    pub fn dump_one_frame(&mut self, ctx: &D3DContext, path: &str) -> Result<(u32, u32)> {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_STAGING,
+        };
+        unsafe {
+            // Try for up to ~2s to get a real (non-timeout) frame with content.
+            let mut frame_tex = None;
+            for _ in 0..200 {
+                match self.acquire_frame(16)? {
+                    Some(f) => {
+                        if let Some(t) = f.texture() {
+                            frame_tex = Some(t.clone());
+                            break;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+            let src = frame_tex
+                .ok_or_else(|| Error::capture("no frame acquired within timeout for dump"))?;
+
+            // Describe a CPU-readable staging copy of the captured texture.
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            src.GetDesc(&mut desc);
+            let (w, h) = (desc.Width, desc.Height);
+            let mut staging_desc = desc;
+            staging_desc.Usage = D3D11_USAGE_STAGING;
+            staging_desc.BindFlags = 0;
+            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            staging_desc.MiscFlags = 0;
+
+            let mut staging: Option<ID3D11Texture2D> = None;
+            ctx.device()
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                .map_err(|e| Error::capture(format!("CreateTexture2D(staging): {e}")))?;
+            let staging = staging.ok_or_else(|| Error::capture("null staging texture"))?;
+
+            ctx.context().CopyResource(&staging, &src);
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.context()
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|e| Error::capture(format!("Map(staging): {e}")))?;
+
+            let row_pitch = mapped.RowPitch as usize;
+            let base = mapped.pData as *const u8;
+            // Compute mean luma to report whether the frame is basically black.
+            let mut sum: u64 = 0;
+            let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+            ppm.reserve((w * h * 3) as usize);
+            for y in 0..h as usize {
+                let row = base.add(y * row_pitch);
+                for x in 0..w as usize {
+                    let px = row.add(x * 4); // BGRA
+                    let b = *px;
+                    let g = *px.add(1);
+                    let r = *px.add(2);
+                    ppm.push(r);
+                    ppm.push(g);
+                    ppm.push(b);
+                    sum += r as u64 + g as u64 + b as u64;
+                }
+            }
+            ctx.context().Unmap(&staging, 0);
+
+            std::fs::write(path, &ppm)
+                .map_err(|e| Error::capture(format!("write {path}: {e}")))?;
+
+            let mean = sum as f64 / (w as f64 * h as f64 * 3.0);
+            tracing::info!(
+                target: "g9::capture",
+                "dumped frame {}x{} to {} (mean pixel value {:.1}/255 — near 0 means a BLACK capture)",
+                w, h, path, mean
+            );
+            Ok((w, h))
+        }
+    }
+}
+
 impl Drop for Capturer {
     fn drop(&mut self) {
         unsafe {

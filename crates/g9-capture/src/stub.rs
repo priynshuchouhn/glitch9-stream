@@ -35,4 +35,8 @@ impl Capturer {
     pub fn acquire_frame(&mut self, _timeout_ms: u32) -> Result<Option<GpuTextureFrame>> {
         Err(Error::Unsupported("capture is only available on Windows".into()))
     }
+
+    pub fn dump_one_frame(&mut self, _ctx: &D3DContext, _path: &str) -> Result<(u32, u32)> {
+        Err(Error::Unsupported("capture is only available on Windows".into()))
+    }
 }

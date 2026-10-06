@@ -14,6 +14,11 @@ pub struct Cli {
     #[arg(long)]
     pub list_displays: bool,
 
+    /// DEBUG: capture one frame from --display to this PPM file and exit. Use this
+    /// to see what DXGI actually grabs (diagnoses black-stream vs capture issues).
+    #[arg(long)]
+    pub dump_frame: Option<String>,
+
     /// Comma-separated outputs: webrtc, youtube, or "webrtc,youtube".
     #[arg(long, default_value = "webrtc")]
     pub output: String,
@@ -82,6 +87,7 @@ pub struct RunConfig {
 
 pub enum Command {
     ListDisplays,
+    DumpFrame { display: u32, path: String },
     Run(RunConfig),
 }
 
@@ -93,6 +99,12 @@ impl Cli {
     pub fn command(self) -> Command {
         if self.list_displays {
             return Command::ListDisplays;
+        }
+        if let Some(path) = self.dump_frame.clone() {
+            return Command::DumpFrame {
+                display: self.display,
+                path,
+            };
         }
 
         let outputs = Outputs::parse(&self.output).unwrap_or_else(|e| {
@@ -155,6 +167,19 @@ impl Cli {
             stats_interval_secs: self.stats_interval,
         })
     }
+}
+
+/// `--dump-frame` implementation: grab one frame from the display and save it, so we
+/// can confirm whether DXGI is capturing real desktop pixels or a black surface.
+pub fn dump_frame(display: u32, path: &str) -> Result<()> {
+    use g9_capture::{Capturer, D3DContext};
+    let ctx = D3DContext::new(None)?;
+    let mut cap = Capturer::new(&ctx, display)?;
+    let (w, h) = cap.dump_one_frame(&ctx, path)?;
+    println!("wrote {w}x{h} frame to {path}");
+    println!("open it to see what the capture grabbed; a black image means DXGI is");
+    println!("capturing a blank surface (likely RDP/duplication), not the GPU desktop.");
+    Ok(())
 }
 
 /// `--list-displays` implementation. Uses the capture crate's DXGI enumeration.
