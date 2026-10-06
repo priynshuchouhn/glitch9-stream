@@ -318,14 +318,22 @@ impl Capturer {
             D3D11_USAGE_STAGING,
         };
         unsafe {
-            // Try for up to ~2s to get a real (non-timeout) frame with content.
+            // Grab several real frames and keep the LAST one. The first AcquireNextFrame
+            // after DuplicateOutput often returns an initial blank/black surface before
+            // the compositor presents real content; skipping ahead captures actual
+            // desktop pixels. We wait up to ~5s for at least a few real frames.
             let mut frame_tex = None;
-            for _ in 0..200 {
+            let mut got = 0;
+            for _ in 0..600 {
                 match self.acquire_frame(16)? {
                     Some(f) => {
                         if let Some(t) = f.texture() {
                             frame_tex = Some(t.clone());
-                            break;
+                            got += 1;
+                            // Keep going until we've seen a handful of real presents.
+                            if got >= 10 {
+                                break;
+                            }
                         }
                     }
                     None => continue,
