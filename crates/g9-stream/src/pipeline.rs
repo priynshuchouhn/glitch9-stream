@@ -50,20 +50,41 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     // None when WebRTC isn't an output (RTMP-only runs at the fixed profile bitrate).
     let mut abr_target: Option<Arc<std::sync::atomic::AtomicU32>> = None;
     if cfg.outputs.webrtc {
-        let t = Arc::new(g9_webrtc::WebRtcTransport::with_params(
-            cfg.signaling.bind_addr.clone(),
-            cfg.signaling.port,
-            cfg.video.fps,
-            cfg.video.bitrate_bps,
-        ));
-        // Wire keyframe-on-demand: viewer-join and PLI both set the shared flag.
-        let flag = force_keyframe.clone();
-        t.set_on_viewer_join(move || {
-            flag.store(true, Ordering::SeqCst);
-        });
-        abr_target = Some(t.target_bitrate_handle());
-        tracing::info!("WebRTC viewer: {}", t.viewer_url());
-        transports.push(t);
+        match &cfg.signaling.whip {
+            // Production: publish ONCE to the SFU via WHIP; the SFU fans out to
+            // viewers (handles NAT/scale). On-connect IDR is driven by the SFU's
+            // RTCP (PLI); force a keyframe periodically via the normal GOP.
+            Some(whip) => {
+                let public_ip = std::env::var("G9_PUBLIC_IP").ok().filter(|s| !s.trim().is_empty());
+                let t = Arc::new(g9_webrtc::WhipTransport::new(
+                    whip.url.clone(),
+                    whip.token.clone(),
+                    public_ip,
+                    cfg.video.fps,
+                ));
+                tracing::info!("WebRTC publish (WHIP) -> {}", whip.url);
+                transports.push(t);
+                // Force an initial IDR shortly after startup so the SFU/first viewer
+                // gets a decodable keyframe (WHIP has no on-join callback).
+                force_keyframe.store(true, Ordering::SeqCst);
+            }
+            // Direct mode (dev/LAN): serve browsers from the local signaling server.
+            None => {
+                let t = Arc::new(g9_webrtc::WebRtcTransport::with_params(
+                    cfg.signaling.bind_addr.clone(),
+                    cfg.signaling.port,
+                    cfg.video.fps,
+                    cfg.video.bitrate_bps,
+                ));
+                let flag = force_keyframe.clone();
+                t.set_on_viewer_join(move || {
+                    flag.store(true, Ordering::SeqCst);
+                });
+                abr_target = Some(t.target_bitrate_handle());
+                tracing::info!("WebRTC viewer: {}", t.viewer_url());
+                transports.push(t);
+            }
+        }
     }
     if cfg.outputs.youtube {
         let rtmp = cfg

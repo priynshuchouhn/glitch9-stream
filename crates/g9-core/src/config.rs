@@ -140,11 +140,25 @@ impl Default for AudioConfig {
     }
 }
 
+/// WHIP publish target: when set, the WebRTC output publishes to an SFU via WHIP
+/// instead of serving browsers directly (production: encode once, SFU fans out).
+#[derive(Debug, Clone)]
+pub struct WhipConfig {
+    /// Full WHIP URL, e.g. http://<sfu>:8889/session-<id>/whip
+    pub url: String,
+    /// Bearer token for publish auth (kept out of Debug by using Secret-like care;
+    /// it's an infra token, not a user secret, so plain String is acceptable here).
+    pub token: String,
+}
+
 /// Local signaling / viewer server bind.
 #[derive(Debug, Clone)]
 pub struct SignalingConfig {
     pub bind_addr: String,
     pub port: u16,
+    /// When Some, the WebRTC output publishes to this SFU via WHIP instead of
+    /// serving browsers from the local signaling server.
+    pub whip: Option<WhipConfig>,
 }
 
 impl Default for SignalingConfig {
@@ -152,6 +166,7 @@ impl Default for SignalingConfig {
         Self {
             bind_addr: "127.0.0.1".to_string(),
             port: 8080,
+            whip: None,
         }
     }
 }

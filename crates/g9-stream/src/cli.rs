@@ -66,6 +66,16 @@ pub struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     pub bind: String,
 
+    /// Publish the WebRTC stream to an SFU via WHIP instead of serving browsers
+    /// directly (production: GPU encodes once, SFU fans out + handles NAT). Full
+    /// WHIP URL, e.g. http://<sfu>:8889/session-<id>/whip.
+    #[arg(long)]
+    pub publish_whip: Option<String>,
+
+    /// Bearer token for WHIP publish auth. Prefer the G9_WHIP_TOKEN env var.
+    #[arg(long)]
+    pub whip_token: Option<String>,
+
     /// Metrics snapshot interval (seconds).
     #[arg(long, default_value_t = 5)]
     pub stats_interval: u64,
@@ -163,6 +173,13 @@ impl Cli {
             signaling: SignalingConfig {
                 bind_addr: self.bind,
                 port: self.port,
+                whip: self.publish_whip.as_ref().filter(|u| !u.trim().is_empty()).map(|url| {
+                    let token = std::env::var("G9_WHIP_TOKEN")
+                        .ok()
+                        .or_else(|| self.whip_token.clone())
+                        .unwrap_or_default();
+                    g9_core::config::WhipConfig { url: url.clone(), token }
+                }),
             },
             stats_interval_secs: self.stats_interval,
         })

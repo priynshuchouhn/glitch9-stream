@@ -4,5 +4,7 @@
 mod packetizer;
 pub mod signaling;
 mod transport;
+mod whip;
 
 pub use transport::WebRtcTransport;
+pub use whip::WhipTransport;
