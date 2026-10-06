@@ -16,6 +16,12 @@ g9-encode = { path = "../g9-encode" }
 g9-audio = { path = "../g9-audio" }
 g9-webrtc = { path = "../g9-webrtc" }
 g9-rtmp = { path = "../g9-rtmp" }
+# Both aws-lc-rs and ring crypto backends end up in the tree (webrtc-rs DTLS +
+# RTMPS TLS), so rustls can't auto-pick one and panics at the first handshake.
+# Pull rustls with the `ring` backend explicitly and install it as the default
+# process-wide CryptoProvider in main() before any TLS/DTLS runs. `ring` is the
+# most portable (no C/NASM build-time toolchain needed, unlike aws-lc-rs).
+rustls = { workspace = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
