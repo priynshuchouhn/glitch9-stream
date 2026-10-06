@@ -307,20 +307,31 @@ capture the same session concurrently (DXGI Desktop Duplication supports multipl
 duplication clients) at only ~+2-4% NVENC added.
 
 Because duplication only captures its own session, broadcasting N sessions = N
-engine instances, one launched inside each session (SYSTEM, `PsExec -i <id>`) on
-its own port. `broadcast-manager.ps1` enumerates active gamer sessions, maps each
-to a deterministic port (BasePort + sessionId), and does start/stop/status.
+engine instances, one launched inside each session on its own port. The native
+**`glitch9-manager`** binary (crate `g9-manager`) enumerates active gamer sessions
+via the WTS API and launches one engine per session **directly in-session** using
+the session's user token (`WTSQueryUserToken` + `CreateProcessAsUserW`) — no
+PsExec, no PowerShell. Deterministic port = `base_port + session_id`.
+
+Two hard-won deployment details:
+- The manager must run **as SYSTEM** (`WTSQueryUserToken` needs SE_TCB privilege;
+  only SYSTEM has it). Run it from a SYSTEM service or `PsExec -s`.
+- Gamer accounts are **blocked from running cmd.exe** by group policy
+  (0x800704EC), so the manager launches the engine **.exe directly** — injecting
+  `G9_PUBLIC_IP` into a rebuilt environment block and redirecting stdout/stderr to
+  the per-session log via an inheritable file handle.
 
 Verified on hardware: **5 concurrent broadcasts** (gamer1→8082 … gamer5→8086),
-5 engine processes, GPU ENC ~16-23% total, VRAM ~9.9 GB — comfortable headroom
-on the 24 GB card. Sessions with an active game capture at 60fps; idle sessions
-show 0fps (DXGI delivers no frames when nothing changes) and start automatically
-when motion appears. Manager usage:
+5 engine processes (~55-60 MB each), all ports LIVE, GPU ENC ~16-23% total, VRAM
+~9.9 GB — comfortable headroom on the 24 GB card. Sessions with an active game
+capture at 60fps; idle sessions show 0fps (DXGI delivers no frames when nothing
+changes) and start automatically when motion appears.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action start   # one engine per gamer session
-powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action status  # list sessions + LIVE ports
-powershell -ExecutionPolicy Bypass -File broadcast-manager.ps1 -Action stop
+```bat
+REM run the manager as SYSTEM (service, or via PsExec -s for testing):
+glitch9-manager.exe start    # one engine per active gamer session
+glitch9-manager.exe status   # list sessions + LIVE ports
+glitch9-manager.exe stop     # stop all (does not need SYSTEM)
 ```
 
 ### Now also verified
