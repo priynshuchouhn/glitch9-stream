@@ -175,6 +175,15 @@ impl WebRtcTransport {
             }
         }
 
+        // Chrome hides its host candidate behind an mDNS `.local` name. webrtc-rs
+        // ignores those unless mDNS resolution is enabled — without this, the engine
+        // receives the browser's `.local` candidate but can't resolve it to send its
+        // STUN check back, so the pair never completes (ICE → failed). Enable mDNS so
+        // the engine resolves `.local` candidates AND answers queries for its own.
+        se.set_ice_multicast_dns_mode(
+            webrtc::ice::mdns::MulticastDnsMode::QueryAndGather,
+        );
+
         Ok(APIBuilder::new()
             .with_media_engine(m)
             .with_interceptor_registry(registry)
