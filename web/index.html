@@ -78,7 +78,22 @@
       pc.addTransceiver('video', { direction: 'recvonly' });
       pc.addTransceiver('audio', { direction: 'recvonly' });
 
-      pc.ontrack = (e) => { v.srcObject = e.streams[0]; };
+      // Attach incoming tracks to the video element. The engine adds a video and an
+      // audio track; `e.streams[0]` can differ per track (or be empty), so blindly
+      // assigning srcObject per track can leave the element pointing at a stream
+      // WITHOUT the decoding video track (symptom: frames decode but videoWidth=0,
+      // black screen). Instead, keep ONE MediaStream and add each track to it, then
+      // assign once. This guarantees the decoding video track is the one rendered.
+      const inboundStream = new MediaStream();
+      pc.ontrack = (e) => {
+        console.log('[track] kind:', e.track.kind, 'id:', e.track.id);
+        inboundStream.addTrack(e.track);
+        if (v.srcObject !== inboundStream) {
+          v.srcObject = inboundStream;
+        }
+        // Nudge playback (autoplay can stall until a track is attached).
+        v.play().catch(() => {});
+      };
       pc.onicecandidate = (e) => {
         if (e.candidate) {
           console.log('[ICE] local candidate:', e.candidate.candidate);
