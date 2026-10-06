@@ -97,15 +97,27 @@ impl SignalingServer {
             let (mut stream, peer) = listener.accept().await?;
             let srv = srv.clone();
             tokio::spawn(async move {
-                // Peek the request head to route: an Upgrade: websocket request on /ws
-                // becomes a viewer; a plain GET / returns the viewer HTML page.
-                let mut peek = [0u8; 1024];
-                let n = match stream.peek(&mut peek).await {
-                    Ok(n) => n,
-                    Err(_) => return,
-                };
-                let head = String::from_utf8_lossy(&peek[..n]);
-                let is_ws = head.to_ascii_lowercase().contains("upgrade: websocket");
+                // Peek the request head to route. `peek` can return before the full
+                // header has arrived, so retry until we see the end of headers
+                // (\r\n\r\n) or the Upgrade line, with a short bound.
+                let mut peek = [0u8; 2048];
+                let mut head = String::new();
+                let mut is_ws = false;
+                for _ in 0..50 {
+                    match stream.peek(&mut peek).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head = String::from_utf8_lossy(&peek[..n]).to_ascii_lowercase();
+                            is_ws = head.contains("upgrade: websocket");
+                            if is_ws || head.contains("\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                tracing::debug!(target: "g9::webrtc", "conn {peer}: is_ws={is_ws}");
 
                 if is_ws {
                     match tokio_tungstenite::accept_async(stream).await {
@@ -131,11 +143,18 @@ impl SignalingServer {
         &self,
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     ) -> anyhow::Result<()> {
+        tracing::info!(target: "g9::webrtc", "viewer connected (WS up); creating PeerConnection");
         let pc = Arc::new(self.api.new_peer_connection(self.rtc_config.clone()).await?);
 
         // Add the shared tracks (view-only: we only send).
         pc.add_track(self.video_track.clone()).await?;
         pc.add_track(self.audio_track.clone()).await?;
+
+        // Log connection-state transitions so we can see where it stalls.
+        pc.on_peer_connection_state_change(Box::new(|s| {
+            tracing::info!(target: "g9::webrtc", "peer connection state: {s}");
+            Box::pin(async {})
+        }));
 
         self.viewers.fetch_add(1, Ordering::Relaxed);
         // Ask the engine to force an IDR so this viewer decodes immediately.
@@ -186,12 +205,26 @@ impl SignalingServer {
                     };
                     match signal {
                         SignalMessage::Offer { sdp } => {
-                            let offer = RTCSessionDescription::offer(sdp)?;
-                            pc.set_remote_description(offer).await?;
-                            let answer = pc.create_answer(None).await?;
-                            pc.set_local_description(answer.clone()).await?;
-                            let txt = serde_json::to_string(&SignalMessage::Answer { sdp: answer.sdp })?;
-                            ws_tx.send(Message::Text(txt)).await?;
+                            tracing::info!(target: "g9::webrtc", "received SDP offer ({} bytes)", sdp.len());
+                            let offer = match RTCSessionDescription::offer(sdp) {
+                                Ok(o) => o,
+                                Err(e) => { tracing::error!(target: "g9::webrtc", "bad offer: {e}"); continue; }
+                            };
+                            if let Err(e) = pc.set_remote_description(offer).await {
+                                tracing::error!(target: "g9::webrtc", "set_remote_description: {e}"); continue;
+                            }
+                            let answer = match pc.create_answer(None).await {
+                                Ok(a) => a,
+                                Err(e) => { tracing::error!(target: "g9::webrtc", "create_answer: {e}"); continue; }
+                            };
+                            if let Err(e) = pc.set_local_description(answer.clone()).await {
+                                tracing::error!(target: "g9::webrtc", "set_local_description: {e}"); continue;
+                            }
+                            let txt = serde_json::to_string(&SignalMessage::Answer { sdp: answer.sdp })
+                                .unwrap_or_default();
+                            if ws_tx.send(Message::Text(txt)).await.is_ok() {
+                                tracing::info!(target: "g9::webrtc", "sent SDP answer");
+                            }
                         }
                         SignalMessage::Candidate { candidate, sdp_mid, sdp_mline_index } => {
                             use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
