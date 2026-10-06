@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn run(cfg: RunConfig) -> Result<()> {
+    tracing::info!("glitch9-stream build: commit {}", env!("G9_GIT_HASH"));
     tracing::info!(
         "glitch9-stream starting: outputs={:?} {}x{}@{} {} bps audio={}",
         cfg.outputs,
