@@ -90,9 +90,16 @@ path is GPU-resident), dropped-frame counters, and per-transport stats
 
 ## Building on the VM directly (fast iteration)
 
-Instead of CI → download → copy, you can build on the Windows+NVIDIA VM. One-time
-install: rustup (MSVC), VS2022 Build Tools (VCTools + Windows SDK), LLVM, CMake,
-NASM, Git. Then from the repo root:
+Instead of CI → download → copy, you can build on the Windows+NVIDIA VM.
+
+One-time setup — run in an **elevated** prompt (installs rustup/MSVC Build Tools/
+LLVM/CMake/NASM/Git via winget):
+
+```bat
+setup.bat
+```
+
+Then open a **new** shell (so PATH updates apply) and build from the repo root:
 
 ```bat
 build.bat            :: release build (auto-loads the MSVC env + libclang)
