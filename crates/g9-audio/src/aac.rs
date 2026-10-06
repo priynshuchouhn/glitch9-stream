@@ -11,12 +11,13 @@
 
 use crate::asc::{audio_specific_config, AAC_LC};
 use crate::PcmChunk;
-use g9_core::{transport::AudioPacket, Error, Result};
+use g9_core::{transport::AudioPacket, Result};
 use std::time::Duration;
 
 pub struct AacEncoder {
     sample_rate: u32,
     channels: u8,
+    #[allow(dead_code)] // read in the MFT; referenced via the ctor on Windows
     bitrate_bps: u32,
     emitted_config: bool,
     samples_emitted: u64,

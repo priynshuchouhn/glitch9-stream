@@ -105,9 +105,9 @@ impl NvencEncoder {
                 _ => NV_ENC_PRESET_P4_GUID,
             };
             let tuning = match profile.tuning.as_str() {
-                "ultra_low_latency" => NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
-                "high_quality" => NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_HIGH_QUALITY,
-                _ => NV_ENC_TUNING_INFO_NV_ENC_TUNING_INFO_LOW_LATENCY,
+                "ultra_low_latency" => NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
+                "high_quality" => NV_ENC_TUNING_INFO_HIGH_QUALITY,
+                _ => NV_ENC_TUNING_INFO_LOW_LATENCY,
             };
             let mut preset_cfg = std::mem::zeroed::<NV_ENC_PRESET_CONFIG>();
             preset_cfg.version = ver_preset_cfg();
@@ -134,14 +134,14 @@ impl NvencEncoder {
             config.frameIntervalP = (profile.b_frames as i32) + 1;
             config.rcParams.version = ver_rc();
             config.rcParams.rateControlMode = match profile.rate_control {
-                RateControl::Cbr => NV_ENC_PARAMS_RC_MODE_NV_ENC_PARAMS_RC_CBR,
-                RateControl::VbrCapped => NV_ENC_PARAMS_RC_MODE_NV_ENC_PARAMS_RC_VBR,
+                RateControl::Cbr => NV_ENC_PARAMS_RC_CBR,
+                RateControl::VbrCapped => NV_ENC_PARAMS_RC_VBR,
             };
             config.rcParams.averageBitRate = profile.bitrate_bps;
             config.rcParams.maxBitRate = profile.bitrate_bps;
             config.rcParams.vbvBufferSize = profile.bitrate_bps / profile.fps.max(1);
             config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
-            config.rcParams.set_lookaheadDepth(profile.lookahead as u16);
+            config.rcParams.lookaheadDepth = profile.lookahead as u16;
 
             // 6) Initialize encoder.
             let mut init = std::mem::zeroed::<NV_ENC_INITIALIZE_PARAMS>();
@@ -154,7 +154,7 @@ impl NvencEncoder {
             init.darHeight = profile.height;
             init.frameRateNum = profile.fps;
             init.frameRateDen = 1;
-            init.set_enablePTD(1);
+            init.enablePTD = 1;
             init.tuningInfo = tuning;
             init.encodeConfig = &mut config;
             let st = (api.nvEncInitializeEncoder.unwrap())(session, &mut init);
@@ -205,11 +205,11 @@ impl NvencEncoder {
             // Register the D3D11 NV12 texture (zero-copy input).
             let mut reg = std::mem::zeroed::<NV_ENC_REGISTER_RESOURCE>();
             reg.version = ver_register();
-            reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+            reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
             reg.width = self.width;
             reg.height = self.height;
             reg.resourceToRegister = tex.as_raw();
-            reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV_ENC_BUFFER_FORMAT_NV12;
+            reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
             let st = (self.api.nvEncRegisterResource.unwrap())(self.encoder, &mut reg);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!(
@@ -238,15 +238,14 @@ impl NvencEncoder {
             pic.inputWidth = self.width;
             pic.inputHeight = self.height;
             pic.inputBuffer = map.mappedResource;
-            pic.bufferFmt = NV_ENC_BUFFER_FORMAT_NV_ENC_BUFFER_FORMAT_NV12;
-            pic.pictureStruct = NV_ENC_PIC_STRUCT_NV_ENC_PIC_STRUCT_FRAME;
+            pic.bufferFmt = NV_ENC_BUFFER_FORMAT_NV12;
+            pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
             pic.outputBitstream = self.bitstream;
             pic.inputTimeStamp = pts.as_millis() as u64;
             pic.frameIdx = self.frame_index;
             if self.force_idr {
-                pic.encodePicFlags |= (NV_ENC_PIC_FLAGS_NV_ENC_PIC_FLAG_FORCEIDR
-                    | NV_ENC_PIC_FLAGS_NV_ENC_PIC_FLAG_OUTPUT_SPSPPS)
-                    as u32;
+                pic.encodePicFlags |=
+                    (NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS) as u32;
                 self.force_idr = false;
             }
 

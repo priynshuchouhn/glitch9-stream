@@ -10,7 +10,6 @@ use crate::PcmChunk;
 use g9_core::{Error, Result};
 use std::time::{Duration, Instant};
 
-use windows::core::Interface;
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
