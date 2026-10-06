@@ -87,13 +87,18 @@ fn matches_pattern(user: &str, pattern: &str) -> bool {
 /// Launch the engine inside `session` using that session's user token.
 fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     let port = session.port(cfg.base_port);
-    let log = format!("{}\\session-{}.log", cfg.log_dir.trim_end_matches('\\'), session.id);
+    let dir = cfg.log_dir.trim_end_matches('\\');
+    let log = format!("{dir}\\session-{}.log", session.id);
+    let bat = format!("{dir}\\_launch-{}.bat", session.id);
 
-    // Build the command line. cmd.exe wrapper lets us redirect the engine's output
-    // to a per-session log file and set G9_PUBLIC_IP for ICE.
-    let cmdline = format!(
-        "cmd.exe /c set G9_PUBLIC_IP={ip}&& \"{engine}\" --bind 0.0.0.0 --port {port} \
-         --display 0 --width {w} --height {h} --fps {fps} --bitrate {br} --audio true > \"{log}\" 2>&1",
+    // Inline command lines with &&/> redirection are fragile through
+    // CreateProcessAsUserW. Write a tiny per-session .bat and run `cmd /c <bat>`
+    // instead — robust quoting, and the .bat sets the env + redirects to the log.
+    let bat_contents = format!(
+        "@echo off\r\n\
+         set G9_PUBLIC_IP={ip}\r\n\
+         \"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
+         --fps {fps} --bitrate {br} --audio true > \"{log}\" 2>&1\r\n",
         ip = cfg.public_ip,
         engine = cfg.engine,
         port = port,
@@ -103,6 +108,9 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         br = cfg.bitrate,
         log = log,
     );
+    std::fs::write(&bat, bat_contents).with_context(|| format!("write {bat}"))?;
+
+    let cmdline = format!("cmd.exe /c \"{bat}\"");
 
     unsafe {
         // Get the session's user token so the process runs in that session/desktop.
@@ -122,6 +130,14 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         si.lpDesktop = PWSTR(desktop.as_mut_ptr());
         let mut pi = PROCESS_INFORMATION::default();
 
+        // Working directory = log/root dir (so relative paths resolve sanely).
+        let mut cwd_utf16: Vec<u16> = cfg
+            .log_dir
+            .trim_end_matches('\\')
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
         let flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
         let result = CreateProcessAsUserW(
             token,
@@ -132,7 +148,7 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
             false,
             flags,
             if have_env { Some(env) } else { None },
-            PCWSTR::null(),
+            PCWSTR(cwd_utf16.as_mut_ptr()),
             &si,
             &mut pi,
         );
