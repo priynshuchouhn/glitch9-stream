@@ -68,6 +68,11 @@
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       });
+      // Expose for debugging from the console.
+      window.pc = pc;
+      pc.oniceconnectionstatechange = () => console.log('[ICE] connection state:', pc.iceConnectionState);
+      pc.onicegatheringstatechange = () => console.log('[ICE] gathering state:', pc.iceGatheringState);
+      pc.onicecandidateerror = (e) => console.warn('[ICE] candidate error:', e.errorText, e.url);
 
       // We only receive.
       pc.addTransceiver('video', { direction: 'recvonly' });
@@ -75,12 +80,15 @@
 
       pc.ontrack = (e) => { v.srcObject = e.streams[0]; };
       pc.onicecandidate = (e) => {
-        if (e.candidate) ws.send(JSON.stringify({
-          type: 'candidate',
-          candidate: e.candidate.candidate,
-          sdpMid: e.candidate.sdpMid,
-          sdpMLineIndex: e.candidate.sdpMLineIndex,
-        }));
+        if (e.candidate) {
+          console.log('[ICE] local candidate:', e.candidate.candidate);
+          ws.send(JSON.stringify({
+            type: 'candidate',
+            candidate: e.candidate.candidate,
+            sdpMid: e.candidate.sdpMid,
+            sdpMLineIndex: e.candidate.sdpMLineIndex,
+          }));
+        }
       };
       pc.onconnectionstatechange = () => { $('state').textContent = pc.connectionState; };
 
