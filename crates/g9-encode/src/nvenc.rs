@@ -35,6 +35,7 @@ fn ver_register() -> u32 { struct_version(5) }
 fn ver_map() -> u32 { struct_version(4) }
 fn ver_pic() -> u32 { struct_version(7) | HI }
 fn ver_lock() -> u32 { struct_version(2) | HI }
+fn ver_reconfigure() -> u32 { struct_version(2) | HI }
 
 pub struct NvencEncoder {
     _dll: HMODULE,
@@ -50,6 +51,12 @@ pub struct NvencEncoder {
     height: u32,
     cached_params: Option<g9_core::frame::ParameterSets>,
     logged_sps: bool,
+    // Retained for runtime bitrate reconfiguration (adaptive bitrate). Boxed so the
+    // encodeConfig pointer inside `init` stays valid across reconfigure calls.
+    config: Box<NV_ENC_CONFIG>,
+    init: Box<NV_ENC_INITIALIZE_PARAMS>,
+    cur_bitrate_bps: u32,
+    fps: u32,
 }
 
 impl NvencEncoder {
@@ -157,7 +164,10 @@ impl NvencEncoder {
                 h264.idrPeriod = profile.gop_frames;
             }
 
-            // 6) Initialize encoder.
+            // 6) Initialize encoder. Box the config so its address stays stable —
+            // runtime reconfigure (adaptive bitrate) reuses the same encodeConfig
+            // pointer inside the init params.
+            let mut config_box: Box<NV_ENC_CONFIG> = Box::new(config);
             let mut init = std::mem::zeroed::<NV_ENC_INITIALIZE_PARAMS>();
             init.version = ver_init();
             init.encodeGUID = G9_NV_ENC_CODEC_H264_GUID;
@@ -170,7 +180,7 @@ impl NvencEncoder {
             init.frameRateDen = 1;
             init.enablePTD = 1;
             init.tuningInfo = tuning;
-            init.encodeConfig = &mut config;
+            init.encodeConfig = config_box.as_mut() as *mut _;
             let st = (api.nvEncInitializeEncoder.unwrap())(session, &mut init);
             if st != NV_ENC_SUCCESS {
                 return Err(Error::encode(format!(
@@ -178,6 +188,7 @@ impl NvencEncoder {
                     status_name(st)
                 )));
             }
+            let init_box: Box<NV_ENC_INITIALIZE_PARAMS> = Box::new(init);
 
             // 7) Output bitstream buffer.
             let mut bb = std::mem::zeroed::<NV_ENC_CREATE_BITSTREAM_BUFFER>();
@@ -199,16 +210,62 @@ impl NvencEncoder {
                 clock,
                 frame_index: 0,
                 force_idr: true,
-                width: init.encodeWidth,
-                height: init.encodeHeight,
+                width: init_box.encodeWidth,
+                height: init_box.encodeHeight,
                 cached_params: None,
                 logged_sps: false,
+                cur_bitrate_bps: profile.bitrate_bps,
+                fps: profile.fps.max(1),
+                config: config_box,
+                init: init_box,
             })
         }
     }
 
     pub fn force_idr(&mut self) {
         self.force_idr = true;
+    }
+
+    /// The encoder's current target bitrate (bits/sec).
+    pub fn current_bitrate_bps(&self) -> u32 {
+        self.cur_bitrate_bps
+    }
+
+    /// Adaptive bitrate: change the NVENC target bitrate at runtime via
+    /// `nvEncReconfigureEncoder`. Called by the pipeline in response to the WebRTC
+    /// bandwidth estimate so the stream adapts to a varying network (down on
+    /// congestion/loss, back up when the path clears) instead of a fixed CBR that
+    /// floods a weak link. No session teardown — the encode loop continues.
+    pub fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()> {
+        let bitrate_bps = bitrate_bps.clamp(300_000, 50_000_000);
+        if bitrate_bps == self.cur_bitrate_bps {
+            return Ok(());
+        }
+        unsafe {
+            // Update the retained config's rate-control params in place.
+            self.config.rcParams.averageBitRate = bitrate_bps;
+            self.config.rcParams.maxBitRate = bitrate_bps;
+            self.config.rcParams.vbvBufferSize = bitrate_bps / self.fps;
+            self.config.rcParams.vbvInitialDelay = self.config.rcParams.vbvBufferSize;
+
+            // Build the reconfigure params around the retained init (which already
+            // points at the retained config). Don't reset the encoder (keeps the
+            // stream continuous); don't force IDR here (bitrate change applies to
+            // following frames).
+            let mut reconf = std::mem::zeroed::<NV_ENC_RECONFIGURE_PARAMS>();
+            reconf.version = ver_reconfigure();
+            reconf.reInitEncodeParams = *self.init;
+
+            let st = (self.api.nvEncReconfigureEncoder.unwrap())(self.encoder, &mut reconf);
+            if st != NV_ENC_SUCCESS {
+                return Err(Error::encode(format!(
+                    "ReconfigureEncoder({bitrate_bps}): {} ({st})",
+                    status_name(st)
+                )));
+            }
+        }
+        self.cur_bitrate_bps = bitrate_bps;
+        Ok(())
     }
 
     pub fn encode(&mut self, nv12: &GpuTextureFrame) -> Result<Option<EncodedFrame>> {

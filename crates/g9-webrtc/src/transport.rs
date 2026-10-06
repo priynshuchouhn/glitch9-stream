@@ -54,6 +54,11 @@ pub struct WebRtcTransport {
     audio_tx: mpsc::Sender<AudioPacket>,
     audio_rx: Mutex<Option<mpsc::Receiver<AudioPacket>>>,
     on_viewer_join: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    /// Adaptive-bitrate estimate (bits/sec), updated from RTCP Receiver Reports.
+    /// The pipeline reads this and reconfigures NVENC. Starts at `max_bitrate`.
+    target_bitrate: Arc<AtomicU32>,
+    min_bitrate: u32,
+    max_bitrate: u32,
 }
 
 impl WebRtcTransport {
@@ -62,8 +67,21 @@ impl WebRtcTransport {
     }
 
     pub fn with_fps(bind_addr: impl Into<String>, port: u16, fps: u32) -> Self {
+        // Default max bitrate 8 Mbps when not specified.
+        Self::with_params(bind_addr, port, fps, 8_000_000)
+    }
+
+    /// `max_bitrate_bps` is the ceiling the adaptive controller ramps toward; the
+    /// floor is 1/8th of it (min 400 kbps). The estimate starts at the ceiling.
+    pub fn with_params(
+        bind_addr: impl Into<String>,
+        port: u16,
+        fps: u32,
+        max_bitrate_bps: u32,
+    ) -> Self {
         let (video_tx, video_rx) = mpsc::channel(VIDEO_QUEUE_DEPTH);
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_QUEUE_DEPTH);
+        let min_bitrate = (max_bitrate_bps / 8).max(400_000).min(max_bitrate_bps);
         Self {
             name: "webrtc".into(),
             bind_addr: bind_addr.into(),
@@ -78,11 +96,26 @@ impl WebRtcTransport {
             audio_tx,
             audio_rx: Mutex::new(Some(audio_rx)),
             on_viewer_join: Arc::new(Mutex::new(None)),
+            target_bitrate: Arc::new(AtomicU32::new(max_bitrate_bps)),
+            min_bitrate,
+            max_bitrate: max_bitrate_bps,
         }
     }
 
     pub fn set_on_viewer_join<F: Fn() + Send + Sync + 'static>(&self, f: F) {
         *self.on_viewer_join.lock() = Some(Box::new(f));
+    }
+
+    /// Current adaptive-bitrate target (bits/sec). The pipeline polls this and
+    /// reconfigures NVENC. Returns the ceiling until the first Receiver Report.
+    pub fn target_bitrate_bps(&self) -> u32 {
+        self.target_bitrate.load(Ordering::Relaxed)
+    }
+
+    /// Share the adaptive-bitrate target with the video thread so it can reconfigure
+    /// the encoder without going through the `dyn MediaTransport` boundary.
+    pub fn target_bitrate_handle(&self) -> Arc<AtomicU32> {
+        self.target_bitrate.clone()
     }
 
     pub fn viewer_url(&self) -> String {
@@ -310,6 +343,9 @@ impl MediaTransport for WebRtcTransport {
             viewers: self.viewers.clone(),
             state: self.state.clone(),
             on_viewer_join: self.on_viewer_join.clone(),
+            target_bitrate: self.target_bitrate.clone(),
+            min_bitrate: self.min_bitrate,
+            max_bitrate: self.max_bitrate,
         };
 
         tokio::spawn(async move {

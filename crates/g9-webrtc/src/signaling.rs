@@ -102,6 +102,10 @@ pub struct SignalingServer {
     pub viewers: Arc<AtomicU32>,
     pub state: Arc<AtomicU8>,
     pub on_viewer_join: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    /// Adaptive bitrate: updated from RTCP Receiver Reports; read by the pipeline.
+    pub target_bitrate: Arc<AtomicU32>,
+    pub min_bitrate: u32,
+    pub max_bitrate: u32,
 }
 
 impl SignalingServer {
@@ -174,24 +178,60 @@ impl SignalingServer {
         // periodic GOP keyframe (~4s) or stays black forever if timing is unlucky.
         {
             let force_kf = self.on_viewer_join.clone();
+            let target_bitrate = self.target_bitrate.clone();
+            let min_bitrate = self.min_bitrate;
+            let max_bitrate = self.max_bitrate;
             tokio::spawn(async move {
                 use webrtc::rtcp::payload_feedbacks::{
                     full_intra_request::FullIntraRequest,
                     picture_loss_indication::PictureLossIndication,
                 };
-                // read_rtcp parses incoming RTCP for us; it returns Err when the
-                // sender/connection closes, which ends this task cleanly.
+                use webrtc::rtcp::receiver_report::ReceiverReport;
+
+                // Loss-based adaptive bitrate controller (a simplified GCC loss
+                // signal). Each Receiver Report carries fraction_lost (0-255 = 0-100%
+                // of packets lost since the last report). React:
+                //   - loss > 10%  -> multiplicative decrease (x0.85): back off hard
+                //   - loss <  2%  -> additive increase (+5% of max): probe upward
+                //   - 2-10%       -> hold
+                // Clamped to [min_bitrate, max_bitrate]. This keeps the stream within
+                // what the path can carry instead of a fixed CBR that floods a weak
+                // link (which earlier produced 40-60% loss and a black screen).
                 while let Ok((pkts, _attrs)) = video_sender.read_rtcp().await {
                     for p in &pkts {
-                        let want_kf = p
-                            .as_any()
-                            .downcast_ref::<PictureLossIndication>()
-                            .is_some()
-                            || p.as_any().downcast_ref::<FullIntraRequest>().is_some();
-                        if want_kf {
+                        if p.as_any().downcast_ref::<PictureLossIndication>().is_some()
+                            || p.as_any().downcast_ref::<FullIntraRequest>().is_some()
+                        {
                             tracing::info!(target: "g9::webrtc", "RTCP keyframe request (PLI/FIR) -> force IDR");
                             if let Some(cb) = force_kf.lock().as_ref() {
                                 cb();
+                            }
+                        }
+                        if let Some(rr) = p.as_any().downcast_ref::<ReceiverReport>() {
+                            // Use the worst fraction_lost across reception reports.
+                            let frac = rr
+                                .reports
+                                .iter()
+                                .map(|r| r.fraction_lost)
+                                .max()
+                                .unwrap_or(0);
+                            let loss = frac as f64 / 256.0;
+                            let cur = target_bitrate.load(Ordering::Relaxed).max(min_bitrate);
+                            let next = if loss > 0.10 {
+                                ((cur as f64) * 0.85) as u32
+                            } else if loss < 0.02 {
+                                cur + (max_bitrate / 20) // +5% of ceiling
+                            } else {
+                                cur
+                            }
+                            .clamp(min_bitrate, max_bitrate);
+                            if next != cur {
+                                tracing::info!(
+                                    target: "g9::webrtc",
+                                    "ABR: loss={:.1}% {} -> {} kbps",
+                                    loss * 100.0, cur / 1000, next / 1000
+                                );
+                                target_bitrate.store(next, Ordering::Relaxed);
                             }
                         }
                     }

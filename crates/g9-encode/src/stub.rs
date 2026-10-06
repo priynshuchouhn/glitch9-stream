@@ -31,4 +31,13 @@ impl NvencEncoder {
 
     /// Request the next encoded frame be an IDR (e.g. new viewer / PLI / reconnect).
     pub fn force_idr(&mut self) {}
+
+    pub fn current_bitrate_bps(&self) -> u32 {
+        0
+    }
+
+    /// Adaptive bitrate (no-op off-Windows).
+    pub fn set_bitrate(&mut self, _bitrate_bps: u32) -> Result<()> {
+        Ok(())
+    }
 }

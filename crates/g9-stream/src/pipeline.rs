@@ -46,17 +46,22 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
 
     // --- Build transports ---
     let mut transports: Vec<Arc<dyn MediaTransport>> = Vec::new();
+    // Adaptive-bitrate target shared from the WebRTC transport to the video thread.
+    // None when WebRTC isn't an output (RTMP-only runs at the fixed profile bitrate).
+    let mut abr_target: Option<Arc<std::sync::atomic::AtomicU32>> = None;
     if cfg.outputs.webrtc {
-        let t = Arc::new(g9_webrtc::WebRtcTransport::with_fps(
+        let t = Arc::new(g9_webrtc::WebRtcTransport::with_params(
             cfg.signaling.bind_addr.clone(),
             cfg.signaling.port,
             cfg.video.fps,
+            cfg.video.bitrate_bps,
         ));
         // Wire keyframe-on-demand: viewer-join and PLI both set the shared flag.
         let flag = force_keyframe.clone();
         t.set_on_viewer_join(move || {
             flag.store(true, Ordering::SeqCst);
         });
+        abr_target = Some(t.target_bitrate_handle());
         tracing::info!("WebRTC viewer: {}", t.viewer_url());
         transports.push(t);
     }
@@ -86,6 +91,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         transports.clone(),
         metrics.clone(),
         force_keyframe.clone(),
+        abr_target,
     );
 
     // --- Spawn the audio thread (WASAPI → Opus/AAC → transports), if enabled ---
@@ -302,11 +308,12 @@ fn spawn_video_thread(
     transports: Vec<Arc<dyn MediaTransport>>,
     metrics: Metrics,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
+    abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("g9-video".into())
         .spawn(move || {
-            if let Err(e) = video_loop(cfg, mode, transports, metrics, force_keyframe) {
+            if let Err(e) = video_loop(cfg, mode, transports, metrics, force_keyframe, abr_target) {
                 tracing::error!("video pipeline stopped: {e}");
             }
         })
@@ -322,6 +329,7 @@ fn video_loop(
     transports: Vec<Arc<dyn MediaTransport>>,
     metrics: Metrics,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
+    abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) -> g9_core::Result<()> {
     use g9_capture::{Capturer, D3DContext};
     use g9_convert::Nv12Converter;
@@ -360,6 +368,7 @@ fn video_loop(
     let target_fps = cfg.fps.max(1);
     let frame_interval = Duration::from_secs_f64(1.0 / target_fps as f64);
     let mut next_frame_at = std::time::Instant::now();
+    let mut next_abr_check = std::time::Instant::now();
 
     let mut geometry_checked = false;
     loop {
@@ -428,6 +437,24 @@ fn video_loop(
         if force_keyframe.swap(false, Ordering::SeqCst) {
             for enc in encoders.iter_mut() {
                 enc.force_idr();
+            }
+        }
+
+        // Adaptive bitrate: apply the latest WebRTC target to the encoder(s). The
+        // transport updates this from RTCP Receiver Reports (loss-based control).
+        // Only reconfigure when it actually changed, and at most ~twice a second.
+        if let Some(abr) = &abr_target {
+            let now = std::time::Instant::now();
+            if now >= next_abr_check {
+                next_abr_check = now + Duration::from_millis(500);
+                let target = abr.load(Ordering::Relaxed);
+                for enc in encoders.iter_mut() {
+                    if enc.current_bitrate_bps() != target {
+                        if let Err(e) = enc.set_bitrate(target) {
+                            tracing::warn!("ABR set_bitrate({target}) failed: {e}");
+                        }
+                    }
+                }
             }
         }
         let t_enc = std::time::Instant::now();
