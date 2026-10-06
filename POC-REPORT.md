@@ -14,12 +14,31 @@ captures the Windows desktop via DXGI Desktop Duplication, converts BGRA→NV12 
 the GPU (zero CPU readback), encodes H.264 via NVENC, and delivers the stream
 over WebRTC to a browser viewer.
 
-**All engine components are verified on real hardware.** The full pipeline —
-capture, GPU color conversion, NVENC encoding, WebRTC signaling/ICE/DTLS/SRTP,
-browser playback — works end-to-end. The only blocker to live video in the
-browser is that the test VM's GPU has no attached display (headless), so DXGI
-Desktop Duplication captures a black framebuffer. This is a VM display
-configuration requirement, not an engine defect.
+**STATUS: PROVEN END-TO-END.** Live video of a gamer's GPU-rendered session was
+captured, encoded, and streamed over WebRTC across the public internet to a
+remote browser (macOS), rendering at 1920×1080, ~20fps, ~2 Mbps, 0% packet loss.
+Every stage is verified on real NVIDIA RTX PRO 4000 hardware.
+
+### Critical operational findings (required for deployment)
+
+1. **Capture must run inside the target session, as SYSTEM.** DXGI Desktop
+   Duplication only captures the desktop of the session it runs in. On this
+   multi-session gaming VM, each gamer has their own RDP session with a
+   GPU-composited desktop (own `dwm.exe`). The engine must be launched **in that
+   session** — e.g. `PsExec -s -i <sessionId> run-gamer.bat` — exactly like the
+   production RhinoStream (confirmed running as `system` in the gamer session).
+   Running from SSH (session 0) or the empty console session yields no output
+   (`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`) or a black capture.
+
+2. **Encode must be fps-limited.** DXGI presents at the display's native rate
+   (60-75fps here). Encoding every frame overshot the CBR target (~6.6 Mbps when
+   3 Mbps was set), causing 40-60% packet loss to a remote viewer. Throttling the
+   encoder to the configured fps fixed the bitrate and dropped loss to 0%.
+
+3. **Viewer must attach the decoding track correctly.** With separate video/audio
+   streams, the viewer's `ontrack` must collect the video track into the rendered
+   MediaStream; otherwise frames decode (confirmed 2981 decoded, 0 dropped) but
+   the `<video>` element stays 0×0 / black.
 
 ---
 
@@ -38,7 +57,9 @@ configuration requirement, not an engine defect.
 | DTLS/SRTP (rustls ring provider) | ✅ Verified | `peer connection state: connected`, no panic |
 | RTP media flow | ✅ Verified | `bytes_sent` climbing steadily (1-2 MB/5s), `dropped=0` |
 | Opus audio encode | ✅ Verified | `audio pipeline running (opus=true)` |
-| Browser viewer (Edge/Chromium) | ✅ Verified | `state: connected`, `0.8 Mbps`, `loss 0.0%`, `0ms RTT` |
+| Browser viewer (remote, over internet) | ✅ Verified | **Live video rendered** on macOS browser: 1920×1080, ~20fps, ~2 Mbps, 0% loss |
+| fps-limited encode (bitrate control) | ✅ Verified | encode throttled to configured fps; loss 61.8% → 0% |
+| In-session SYSTEM capture | ✅ Verified | Real GPU desktop captured (dump mean 24.6/255 vs 0.0 when empty) |
 | Geometry mismatch warning | ✅ Added | Engine warns if `--width/--height` don't match captured display |
 | Build-time commit banner | ✅ Added | First log line prints the git commit hash for deploy verification |
 
@@ -54,9 +75,44 @@ configuration requirement, not an engine defect.
 
 ---
 
-## Black Screen Root Cause (Not an Engine Defect)
+## How to Run the POC (verified working)
 
-The browser shows a black stream because the captured desktop is genuinely black.
+```bat
+REM 1. Build (cargo/toolchain under Administrator profile on this VM):
+build-ssh.bat        REM sets RUSTUP_HOME/CARGO_HOME + MSVC env, then cargo build --release
+
+REM 2. Launch INSIDE the target gamer session as SYSTEM (session id from `query session`):
+PsExec64.exe -accepteula -s -i <sessionId> -d C:\glitch9-stream\run-gamer.bat
+REM run-gamer.bat runs:
+REM   set G9_PUBLIC_IP=<vm-ip>
+REM   glitch9-stream.exe --bind 0.0.0.0 --port 8080 --display 0 --width 1920 --height 1080 --fps 30 --bitrate 3000000 --audio false
+
+REM 3. Open the viewer from any browser:
+http://<vm-ip>:8080/   -> Watch stream
+```
+
+Verified result: 1920×1080, ~20fps, ~2 Mbps, 0% loss, live gamer desktop in a
+remote browser.
+
+## Black Screen Debugging Journey (resolved)
+
+The browser initially showed black for three distinct, sequentially-diagnosed
+reasons — none of them capture/encode correctness bugs:
+
+1. **Wrong session.** DXGI captured an empty console/SSH session. Fixed by
+   running as SYSTEM inside the gamer's session (see finding #1 above).
+
+2. **Bitrate overshoot → packet loss.** Encoding at native 64fps instead of the
+   configured 30fps pushed ~6.6 Mbps and caused ~40-60% remote packet loss.
+   Fixed by fps-limiting the encode loop. Loss → 0%.
+
+3. **Viewer track wiring.** Frames decoded cleanly (2981 decoded, 25 keyframes,
+   1920×1080, 0 dropped) but `<video>` was 0×0. Fixed by collecting the inbound
+   video track into the rendered MediaStream.
+
+A `--dump-frame` diagnostic (reads back one captured frame to PPM) confirmed the
+capture content directly: an empty session dumped mean 0.0/255 (black); the
+active gamer session dumped mean 24.6/255 with real desktop content.
 
 ### Diagnosis
 
@@ -201,9 +257,15 @@ target\release\glitch9-stream.exe --list-displays
 
 ## Conclusion
 
-The glitch9-stream engine is production-viable for its target architecture
-(DXGI → GPU → NVENC → WebRTC/RTMPS). Every pipeline stage is verified on real
-NVIDIA hardware with zero CPU pixel copies and sub-15ms capture-to-encode
-latency. The remaining work is deployment configuration (GPU display surface)
-and the RTMPS output test — no engine code changes are needed for the core
-streaming path.
+The glitch9-stream engine is **proven end-to-end** on real NVIDIA RTX PRO 4000
+hardware: a gamer's GPU-rendered session was captured, converted (0 CPU copies),
+NVENC-encoded, and streamed over WebRTC across the public internet to a remote
+browser, rendering live at 1920×1080 with 0% packet loss.
+
+Deployment requires launching the engine inside each target session as SYSTEM
+(matching the production RhinoStream model), fps-limited encoding for stable
+bitrate, and the corrected viewer track handling — all now in the codebase.
+
+Remaining POC work: RTMPS→YouTube output test (code written, needs a stream
+key), multi-viewer load test, and adaptive bitrate / congestion control for
+varying network conditions (currently fixed-rate CBR).
