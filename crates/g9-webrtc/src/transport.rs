@@ -31,6 +31,7 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
+use webrtc::rtp_transceiver::RTCPFeedback;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
@@ -101,7 +102,17 @@ impl WebRtcTransport {
                     sdp_fmtp_line:
                         "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
                             .to_owned(),
-                    rtcp_feedback: vec![],
+                    // Negotiate RTCP feedback so the browser can request a keyframe
+                    // (PLI / FIR) and report loss (NACK). Without this the viewer has
+                    // no way to recover a decodable frame if it joins mid-GOP or loses
+                    // the first IDR — it just shows black until the next periodic
+                    // keyframe (~4s). With PLI wired to force_idr, it self-heals.
+                    rtcp_feedback: vec![
+                        RTCPFeedback { typ: "nack".to_owned(), parameter: "".to_owned() },
+                        RTCPFeedback { typ: "nack".to_owned(), parameter: "pli".to_owned() },
+                        RTCPFeedback { typ: "ccm".to_owned(), parameter: "fir".to_owned() },
+                        RTCPFeedback { typ: "goog-remb".to_owned(), parameter: "".to_owned() },
+                    ],
                 },
                 payload_type: 102,
                 ..Default::default()

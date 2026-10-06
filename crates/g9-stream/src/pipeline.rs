@@ -37,13 +37,25 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let mode = decide_encoder_mode(webrtc_profile.as_ref(), youtube_profile.as_ref());
     tracing::info!("encoder mode: {}", mode.describe());
 
+    // Shared "please emit a keyframe now" flag. The WebRTC transport sets it when a
+    // viewer connects or sends a PLI/FIR; the video thread checks it each iteration
+    // and forces an IDR on every encoder. This is what makes a joining viewer get a
+    // decodable frame promptly instead of waiting for the periodic GOP keyframe.
+    let force_keyframe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // --- Build transports ---
     let mut transports: Vec<Arc<dyn MediaTransport>> = Vec::new();
     if cfg.outputs.webrtc {
-        let t = Arc::new(g9_webrtc::WebRtcTransport::new(
+        let t = Arc::new(g9_webrtc::WebRtcTransport::with_fps(
             cfg.signaling.bind_addr.clone(),
             cfg.signaling.port,
+            cfg.video.fps,
         ));
+        // Wire keyframe-on-demand: viewer-join and PLI both set the shared flag.
+        let flag = force_keyframe.clone();
+        t.set_on_viewer_join(move || {
+            flag.store(true, Ordering::SeqCst);
+        });
         tracing::info!("WebRTC viewer: {}", t.viewer_url());
         transports.push(t);
     }
@@ -67,7 +79,13 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let metrics = Metrics::new();
 
     // --- Spawn the video capture/encode thread (real work happens on Windows+NVIDIA) ---
-    let video_handle = spawn_video_thread(cfg_snapshot(&cfg), mode, transports.clone(), metrics.clone());
+    let video_handle = spawn_video_thread(
+        cfg_snapshot(&cfg),
+        mode,
+        transports.clone(),
+        metrics.clone(),
+        force_keyframe.clone(),
+    );
 
     // --- Spawn the audio thread (WASAPI → Opus/AAC → transports), if enabled ---
     let audio_handle = if cfg.audio.enabled {
@@ -282,11 +300,12 @@ fn spawn_video_thread(
     mode: EncoderMode,
     transports: Vec<Arc<dyn MediaTransport>>,
     metrics: Metrics,
+    force_keyframe: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("g9-video".into())
         .spawn(move || {
-            if let Err(e) = video_loop(cfg, mode, transports, metrics) {
+            if let Err(e) = video_loop(cfg, mode, transports, metrics, force_keyframe) {
                 tracing::error!("video pipeline stopped: {e}");
             }
         })
@@ -301,6 +320,7 @@ fn video_loop(
     mode: EncoderMode,
     transports: Vec<Arc<dyn MediaTransport>>,
     metrics: Metrics,
+    force_keyframe: Arc<std::sync::atomic::AtomicBool>,
 ) -> g9_core::Result<()> {
     use g9_capture::{Capturer, D3DContext};
     use g9_convert::Nv12Converter;
@@ -358,6 +378,13 @@ fn video_loop(
         PipelineCounters::inc(&metrics.counters.frames_converted);
 
         // 3) Encode with each NVENC session (shared NV12 input in dual mode).
+        // If a viewer joined or sent a PLI, force the next encoded frame to be an
+        // IDR (with in-band SPS/PPS) so the viewer gets a decodable keyframe now.
+        if force_keyframe.swap(false, Ordering::SeqCst) {
+            for enc in encoders.iter_mut() {
+                enc.force_idr();
+            }
+        }
         let t_enc = std::time::Instant::now();
         for enc in encoders.iter_mut() {
             if let Some(encoded) = enc.encode(&nv12)? {

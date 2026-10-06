@@ -911,6 +911,7 @@ dependencies = [
  "g9-rtmp",
  "g9-webrtc",
  "parking_lot",
+ "rustls",
  "thiserror",
  "tokio",
  "tracing",

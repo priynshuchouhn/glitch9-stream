@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -113,20 +112,19 @@ impl SignalingServer {
         let srv = Arc::new(self);
 
         loop {
-            let (mut stream, peer) = listener.accept().await?;
+            let (stream, peer) = listener.accept().await?;
             let srv = srv.clone();
             tokio::spawn(async move {
                 // Peek the request head to route. `peek` can return before the full
                 // header has arrived, so retry until we see the end of headers
                 // (\r\n\r\n) or the Upgrade line, with a short bound.
                 let mut peek = [0u8; 2048];
-                let mut head = String::new();
                 let mut is_ws = false;
                 for _ in 0..50 {
                     match stream.peek(&mut peek).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            head = String::from_utf8_lossy(&peek[..n]).to_ascii_lowercase();
+                            let head = String::from_utf8_lossy(&peek[..n]).to_ascii_lowercase();
                             is_ws = head.contains("upgrade: websocket");
                             if is_ws || head.contains("\r\n\r\n") {
                                 break;
@@ -166,13 +164,58 @@ impl SignalingServer {
         let pc = Arc::new(self.api.new_peer_connection(self.rtc_config.clone()).await?);
 
         // Add the shared tracks (view-only: we only send).
-        pc.add_track(self.video_track.clone()).await?;
+        let video_sender = pc.add_track(self.video_track.clone()).await?;
         pc.add_track(self.audio_track.clone()).await?;
 
-        // Log connection-state transitions so we can see where it stalls.
-        pc.on_peer_connection_state_change(Box::new(|s| {
+        // Read RTCP from the video sender. The browser sends PLI/FIR when it needs a
+        // keyframe (e.g. it just joined and has only P-frames, or it lost the IDR).
+        // On either, force an IDR so the viewer gets a decodable frame promptly —
+        // this is what un-blacks the screen. Without it the viewer waits for the next
+        // periodic GOP keyframe (~4s) or stays black forever if timing is unlucky.
+        {
+            let force_kf = self.on_viewer_join.clone();
+            tokio::spawn(async move {
+                use webrtc::rtcp::payload_feedbacks::{
+                    full_intra_request::FullIntraRequest,
+                    picture_loss_indication::PictureLossIndication,
+                };
+                // read_rtcp parses incoming RTCP for us; it returns Err when the
+                // sender/connection closes, which ends this task cleanly.
+                while let Ok((pkts, _attrs)) = video_sender.read_rtcp().await {
+                    for p in &pkts {
+                        let want_kf = p
+                            .as_any()
+                            .downcast_ref::<PictureLossIndication>()
+                            .is_some()
+                            || p.as_any().downcast_ref::<FullIntraRequest>().is_some();
+                        if want_kf {
+                            tracing::info!(target: "g9::webrtc", "RTCP keyframe request (PLI/FIR) -> force IDR");
+                            if let Some(cb) = force_kf.lock().as_ref() {
+                                cb();
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Log connection-state transitions so we can see where it stalls. When the
+        // connection reaches `connected` (DTLS/SRTP ready), force a keyframe: the
+        // join-time IDR fired at WS-connect would be encoded before SRTP is up and
+        // therefore lost, leaving the viewer black until the next PLI/GOP. Forcing it
+        // here guarantees the first decodable frame lands right after media can flow.
+        let force_kf_on_connect = self.on_viewer_join.clone();
+        pc.on_peer_connection_state_change(Box::new(move |s| {
             tracing::info!(target: "g9::webrtc", "peer connection state: {s}");
-            Box::pin(async {})
+            let force_kf = force_kf_on_connect.clone();
+            Box::pin(async move {
+                if s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected {
+                    if let Some(cb) = force_kf.lock().as_ref() {
+                        tracing::info!(target: "g9::webrtc", "peer connected -> force initial IDR");
+                        cb();
+                    }
+                }
+            })
         }));
         pc.on_ice_connection_state_change(Box::new(|s| {
             tracing::info!(target: "g9::webrtc", "ICE connection state: {s}");
@@ -184,10 +227,9 @@ impl SignalingServer {
         }));
 
         self.viewers.fetch_add(1, Ordering::Relaxed);
-        // Ask the engine to force an IDR so this viewer decodes immediately.
-        if let Some(cb) = self.on_viewer_join.lock().as_ref() {
-            cb();
-        }
+        // NOTE: the keyframe is forced on the `connected` state transition (above)
+        // and on PLI/FIR, not here — forcing at WS-connect would encode the IDR
+        // before SRTP is ready, so the viewer would never receive it.
 
         let (mut ws_tx, mut ws_rx) = ws.split();
 
