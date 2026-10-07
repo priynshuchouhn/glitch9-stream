@@ -92,7 +92,10 @@ impl H264Decoder {
                 configure_decoder_types(&self.transform)?;
                 self.configured = true;
             }
-            let sample = wrap_annex_b_sample(annex_b)?;
+            // Monotonic presentation time in 100-ns units (~30fps spacing). The MF
+            // decoder requires timestamps on input samples to emit output.
+            let time_100ns = self.decode_calls as i64 * 333_667;
+            let sample = wrap_annex_b_sample(annex_b, time_100ns)?;
             // Push input; ProcessInput can return "not accepting" if output must be
             // drained first.
             let in_res = self.transform.ProcessInput(0, &sample, 0);
@@ -403,8 +406,11 @@ unsafe fn configure_output_nv12(transform: &IMFTransform) -> Result<()> {
     }
 }
 
-/// Wrap an Annex-B access unit in an `IMFSample` with one memory buffer.
-unsafe fn wrap_annex_b_sample(annex_b: &[u8]) -> Result<IMFSample> {
+/// Wrap an Annex-B access unit in an `IMFSample` with one memory buffer. A sample
+/// time + duration is set because the MF H.264 decoder will not emit output frames
+/// for input samples that lack a timestamp (it returns NEED_MORE_INPUT forever).
+/// `time_100ns` is a monotonic presentation time in 100-ns units.
+unsafe fn wrap_annex_b_sample(annex_b: &[u8], time_100ns: i64) -> Result<IMFSample> {
     let buffer = MFCreateMemoryBuffer(annex_b.len() as u32)
         .map_err(|e| Error::capture(format!("MFCreateMemoryBuffer: {e}")))?;
     let mut ptr: *mut u8 = std::ptr::null_mut();
@@ -422,5 +428,8 @@ unsafe fn wrap_annex_b_sample(annex_b: &[u8]) -> Result<IMFSample> {
     sample
         .AddBuffer(&buffer)
         .map_err(|e| Error::capture(format!("AddBuffer: {e}")))?;
+    // ~30fps worth of duration; exact value isn't important, presence is.
+    let _ = sample.SetSampleTime(time_100ns);
+    let _ = sample.SetSampleDuration(333_667);
     Ok(sample)
 }
