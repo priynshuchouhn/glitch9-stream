@@ -26,6 +26,32 @@ use windows::Win32::Media::MediaFoundation::{
 /// software H.264 MFT returns this once it has resolved the real frame size.
 const MF_E_TRANSFORM_STREAM_CHANGED: i32 = 0xC00D_6D61u32 as i32;
 
+/// Scan an Annex-B buffer and return the NAL unit types present (diagnostic). A
+/// NAL type 7=SPS, 8=PPS, 5=IDR, 1=non-IDR slice. Used to confirm the decoder is
+/// receiving parameter sets.
+fn nal_types_preview(annex_b: &[u8]) -> Vec<u8> {
+    let mut types = Vec::new();
+    let mut i = 0;
+    while i + 4 < annex_b.len() {
+        // Match 00 00 00 01 or 00 00 01 start codes.
+        let sc4 = annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 0 && annex_b[i + 3] == 1;
+        let sc3 = annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 1;
+        if sc4 {
+            types.push(annex_b[i + 4] & 0x1f);
+            i += 4;
+        } else if sc3 {
+            types.push(annex_b[i + 3] & 0x1f);
+            i += 3;
+        } else {
+            i += 1;
+        }
+        if types.len() >= 8 {
+            break;
+        }
+    }
+    types
+}
+
 /// Decodes H.264 access units into NV12 D3D11 textures via a Media Foundation MFT.
 pub struct H264Decoder {
     device: ID3D11Device,
@@ -110,10 +136,16 @@ impl H264Decoder {
                     Ok(None) => "no frame".to_string(),
                     Err(e) => format!("err {e}"),
                 };
+                // Log the NAL types present in this AU so we can see whether SPS(7)/
+                // PPS(8)/IDR(5) are reaching the decoder (prefix bytes after start
+                // codes). The MFT needs SPS/PPS to begin decoding.
+                let nals = nal_types_preview(annex_b);
                 tracing::info!(
-                    "facecam h264 decode #{}: au={}B process_input_err={:?} -> {}",
+                    "facecam h264 decode #{}: au={}B nals={:?} first8={:02x?} process_input_err={:?} -> {}",
                     self.decode_calls,
                     annex_b.len(),
+                    nals,
+                    &annex_b[..annex_b.len().min(8)],
                     in_code,
                     out_desc
                 );
