@@ -639,6 +639,7 @@ fn video_loop(
     };
     // Count facecam frames pulled by the video thread, for first-frames diagnostics.
     let mut facecam_takes: u64 = 0;
+    let mut composite_errors: u64 = 0;
 
     // Build encoder(s) per mode. Dual mode reuses the SAME converted NV12 texture.
     // All encoders share the capture D3D11 device so NVENC registers the NV12
@@ -757,7 +758,12 @@ fn video_loop(
             }
             match comp.composite(&frame) {
                 Ok(output) => composited_frame = output,
-                Err(e) => tracing::warn!("facecam composite error: {e}"),
+                Err(e) => {
+                    composite_errors += 1;
+                    if composite_errors <= 5 || composite_errors % 300 == 0 {
+                        tracing::warn!("facecam composite error #{composite_errors}: {e}");
+                    }
+                }
             }
         }
 

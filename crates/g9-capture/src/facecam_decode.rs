@@ -334,7 +334,9 @@ impl H264Decoder {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            // VideoProcessorInputView requires a video/decoder-bindable NV12
+            // surface. SHADER_RESOURCE alone is rejected with E_INVALIDARG.
+            BindFlags: D3D11_BIND_DECODER.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
