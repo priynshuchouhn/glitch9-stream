@@ -559,6 +559,12 @@ struct WorkerState {
     /// stale worker keeps publishing (or failing to publish) the previous room.
     session_id: String,
 
+    /// Whether this worker was launched with YouTube (RTMP) egress enabled. When
+    /// the broadcast config toggles YouTube on/off for the SAME session (e.g. the
+    /// player goes live to YouTube mid-session), the engine must be relaunched with
+    /// the new `--output`, so we track it and trigger a restart on change.
+    youtube: bool,
+
     /// `bytes_sent` from the last /healthz poll (to detect a stalled encoder).
     last_bytes: u64,
     /// Consecutive polls where the worker was unhealthy (not listening, no /healthz,
@@ -610,6 +616,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
             // game session reuses this gamer slot — a signal to retarget the engine.
             let bc = read_broadcast_config(cfg, &s.user);
             let whip = bc.whip_url().is_some();
+            let youtube = bc.youtube_enabled();
             let session_id = bc.session_id.clone();
 
             match workers.get_mut(&s.id) {
@@ -619,7 +626,11 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     // A new game session reused this slot: the SFU room changed, so the
                     // running engine is publishing the wrong (old) room. Force a relaunch.
                     let session_changed = !session_id.is_empty() && session_id != st.session_id;
-                    let healthy = if session_changed {
+                    // YouTube egress toggled on/off for the SAME session (player went
+                    // live to / ended YouTube mid-session). The engine's --output is
+                    // fixed at launch, so it must be relaunched to add/drop RTMP.
+                    let youtube_changed = youtube != st.youtube;
+                    let healthy = if session_changed || youtube_changed {
                         false
                     } else if st.whip {
                         // WHIP: alive = the engine process is still running. A crashed
@@ -638,9 +649,10 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                             None => false, // not listening / no /healthz = unhealthy
                         }
                     };
-                    // A session change restarts immediately (no threshold): the old room
-                    // is already gone, so there's nothing to protect with a grace period.
-                    let restart = session_changed || {
+                    // A session change or a YouTube toggle restarts immediately (no
+                    // threshold): the config changed under the running engine, so
+                    // there's nothing to protect with a grace period.
+                    let restart = session_changed || youtube_changed || {
                         if healthy {
                             st.unhealthy_polls = 0;
                             false
@@ -655,8 +667,8 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     };
                     if restart {
                         tracing::error!(
-                            "worker session {} -> restarting (session_changed={}, old_room={}, new_room={})",
-                            s.id, session_changed, st.session_id, session_id
+                            "worker session {} -> restarting (session_changed={}, youtube_changed={}, youtube={}, room={})",
+                            s.id, session_changed, youtube_changed, youtube, session_id
                         );
                         // Stop the old worker precisely (by PID for WHIP, by port for
                         // direct) before relaunching, so we never stack engines.
@@ -665,10 +677,10 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                         match launch_in_session(s, cfg) {
                             Ok(pid) => {
                                 tracing::info!(
-                                    "restarted broadcast {} (session {}) [pid {}] room={}",
-                                    s.user, s.id, pid, session_id
+                                    "restarted broadcast {} (session {}) [pid {}] room={} youtube={}",
+                                    s.user, s.id, pid, session_id, youtube
                                 );
-                                *st = WorkerState { pid, whip, session_id: session_id.clone(), ..Default::default() };
+                                *st = WorkerState { pid, whip, youtube, session_id: session_id.clone(), ..Default::default() };
                             }
                             Err(e) => {
                                 tracing::error!("restart session {} failed: {e:#}", s.id);
@@ -692,7 +704,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                                 "session active -> broadcast {} (session {}) [pid {}] whip={} room={}",
                                 s.user, s.id, pid, whip, session_id
                             );
-                            workers.insert(s.id, WorkerState { pid, whip, session_id: session_id.clone(), ..Default::default() });
+                            workers.insert(s.id, WorkerState { pid, whip, youtube, session_id: session_id.clone(), ..Default::default() });
                         }
                         Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
                     }
