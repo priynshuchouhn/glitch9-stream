@@ -172,6 +172,8 @@ async fn pump_h264(
     use webrtc::rtp::packetizer::Depacketizer;
 
     let mut depacketizer = H264Packet::default();
+    let mut rtp_count: u64 = 0;
+    let mut au_count: u64 = 0;
     while !closed.load(Ordering::SeqCst) {
         let (packet, _) = match track.read_rtp().await {
             Ok(v) => v,
@@ -180,8 +182,13 @@ async fn pump_h264(
         if packet.payload.is_empty() {
             continue;
         }
+        rtp_count += 1;
         match depacketizer.depacketize(&packet.payload) {
             Ok(au) if !au.is_empty() => {
+                au_count += 1;
+                if au_count <= 5 {
+                    tracing::info!(target: "g9::whep-sub", "facecam h264 pump: rtp={rtp_count} au#{au_count} ({} bytes)", au.len());
+                }
                 if tx
                     .send(FacecamSample::Video(FacecamVideoCodec::H264, au))
                     .await
@@ -190,7 +197,19 @@ async fn pump_h264(
                     break;
                 }
             }
-            _ => {}
+            Ok(_) => {
+                // Depacketizer consumed the packet but has no complete AU yet
+                // (mid-fragment). Log periodically so a never-assembling stream is
+                // visible instead of silently producing no video.
+                if rtp_count <= 300 && rtp_count % 100 == 0 {
+                    tracing::info!(target: "g9::whep-sub", "facecam h264 pump: {rtp_count} rtp packets, still no complete AU");
+                }
+            }
+            Err(e) => {
+                if rtp_count <= 300 && rtp_count % 100 == 0 {
+                    tracing::info!(target: "g9::whep-sub", "facecam h264 pump: depacketize err after {rtp_count} rtp: {e}");
+                }
+            }
         }
     }
 }
