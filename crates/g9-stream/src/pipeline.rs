@@ -442,6 +442,32 @@ pub enum EncoderMode {
     },
 }
 
+/// Which transport(s) may receive the bitstream produced by an encoder.
+///
+/// A dual-mode encoder has its own H.264 reference-frame history. Mixing the two
+/// encoded streams on either transport makes every interleaved P-frame reference
+/// the wrong history and produces severe decoder corruption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderRoute {
+    All,
+    WebRtc,
+    Youtube,
+}
+
+impl EncoderRoute {
+    fn accepts(self, transport_name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::WebRtc => matches!(transport_name, "webrtc" | "whip"),
+            Self::Youtube => transport_name == "youtube",
+        }
+    }
+
+    fn uses_webrtc_abr(self) -> bool {
+        self != Self::Youtube
+    }
+}
+
 impl EncoderMode {
     pub fn describe(&self) -> String {
         match self {
@@ -553,15 +579,24 @@ fn video_loop(
     // Build encoder(s) per mode. Dual mode reuses the SAME converted NV12 texture.
     // All encoders share the capture D3D11 device so NVENC registers the NV12
     // texture directly (zero-copy) rather than copying through system memory.
-    let mut encoders: Vec<NvencEncoder> = Vec::new();
+    let mut encoders: Vec<(NvencEncoder, EncoderRoute)> = Vec::new();
     match mode {
-        EncoderMode::Shared(p) => encoders.push(NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?),
+        EncoderMode::Shared(p) => encoders.push((
+            NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?,
+            EncoderRoute::All,
+        )),
         EncoderMode::Dual { webrtc, youtube } => {
             if let Some(p) = webrtc {
-                encoders.push(NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?);
+                encoders.push((
+                    NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?,
+                    EncoderRoute::WebRtc,
+                ));
             }
             if let Some(p) = youtube {
-                encoders.push(NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?);
+                encoders.push((
+                    NvencEncoder::new_with_ctx(&ctx, p, clock.clone())?,
+                    EncoderRoute::Youtube,
+                ));
             }
         }
     }
@@ -669,7 +704,7 @@ fn video_loop(
         // If a viewer joined or sent a PLI, force the next encoded frame to be an
         // IDR (with in-band SPS/PPS) so the viewer gets a decodable keyframe now.
         if force_keyframe.swap(false, Ordering::SeqCst) {
-            for enc in encoders.iter_mut() {
+            for (enc, _) in encoders.iter_mut() {
                 enc.force_idr();
             }
         }
@@ -682,7 +717,12 @@ fn video_loop(
             if now >= next_abr_check {
                 next_abr_check = now + Duration::from_millis(500);
                 let target = abr.load(Ordering::Relaxed);
-                for enc in encoders.iter_mut() {
+                for (enc, route) in encoders.iter_mut() {
+                    // WebRTC receiver feedback must never change the fixed-rate
+                    // YouTube encoder in dual mode.
+                    if !route.uses_webrtc_abr() {
+                        continue;
+                    }
                     if enc.current_bitrate_bps() != target {
                         if let Err(e) = enc.set_bitrate(target) {
                             tracing::warn!("ABR set_bitrate({target}) failed: {e}");
@@ -692,19 +732,44 @@ fn video_loop(
             }
         }
         let t_enc = std::time::Instant::now();
-        for enc in encoders.iter_mut() {
+        for (enc, route) in encoders.iter_mut() {
             if let Some(encoded) = enc.encode(&nv12)? {
                 PipelineCounters::inc(&metrics.counters.frames_encoded);
                 let shared = Arc::new(encoded);
-                // 4) Fan out to transports (non-blocking).
+                // 4) Fan out only to transports assigned to this encoder. In
+                // shared mode the one bitstream intentionally feeds all outputs.
                 for t in &transports {
-                    t.send_video(shared.clone());
+                    if route.accepts(t.name()) {
+                        t.send_video(shared.clone());
+                    }
                 }
             }
         }
         metrics.encode_latency.observe(t_enc.elapsed());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EncoderRoute;
+
+    #[test]
+    fn dual_encoder_routes_are_isolated() {
+        assert!(EncoderRoute::WebRtc.accepts("webrtc"));
+        assert!(EncoderRoute::WebRtc.accepts("whip"));
+        assert!(!EncoderRoute::WebRtc.accepts("youtube"));
+        assert!(EncoderRoute::Youtube.accepts("youtube"));
+        assert!(!EncoderRoute::Youtube.accepts("webrtc"));
+        assert!(!EncoderRoute::Youtube.accepts("whip"));
+    }
+
+    #[test]
+    fn youtube_encoder_ignores_webrtc_abr() {
+        assert!(EncoderRoute::All.uses_webrtc_abr());
+        assert!(EncoderRoute::WebRtc.uses_webrtc_abr());
+        assert!(!EncoderRoute::Youtube.uses_webrtc_abr());
+    }
 }
 
 /// Cumulative counters captured at the previous metrics tick, so we can compute
