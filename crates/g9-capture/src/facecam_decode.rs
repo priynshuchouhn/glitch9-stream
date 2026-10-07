@@ -129,7 +129,11 @@ impl H264Decoder {
             // Diagnostic: log the first several decode attempts so we can see the
             // actual MFT input/output results when the facecam fails to appear.
             self.decode_calls += 1;
-            if self.decode_calls <= 10 {
+            // Log the first 10 attempts always, then every 30th, so a keyframe that
+            // only arrives seconds after subscribe (e.g. from a publisher keyframe
+            // nudge) is still visible instead of hidden by an early-only cap.
+            let log_this = self.decode_calls <= 10 || self.decode_calls % 30 == 0;
+            if log_this {
                 let in_code = in_res.as_ref().err().map(|e| e.code().0);
                 let out_desc = match &out {
                     Ok(Some((_, w, h))) => format!("frame {w}x{h}"),
