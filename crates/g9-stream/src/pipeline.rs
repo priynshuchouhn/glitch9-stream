@@ -611,7 +611,7 @@ fn video_loop(
     abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
     facecam: Option<crate::facecam::FacecamState>,
 ) -> g9_core::Result<()> {
-    use g9_capture::{Capturer, D3DContext, FacecamCompositor};
+    use g9_capture::{Capturer, D3DContext, FacecamCompositor, GpuFrameCache};
     use g9_convert::Nv12Converter;
     use g9_core::time::PtsClock;
     use g9_encode::NvencEncoder;
@@ -640,6 +640,10 @@ fn video_loop(
     // Count facecam frames pulled by the video thread, for first-frames diagnostics.
     let mut facecam_takes: u64 = 0;
     let mut composite_errors: u64 = 0;
+    // DXGI reports only desktop changes. When the game is static/minimized, reuse
+    // a safe GPU copy so incoming camera frames still advance on the broadcast.
+    let mut frame_cache = facecam.as_ref().map(|_| GpuFrameCache::new());
+    let mut cache_errors: u64 = 0;
 
     // Build encoder(s) per mode. Dual mode reuses the SAME converted NV12 texture.
     // All encoders share the capture D3D11 device so NVENC registers the NV12
@@ -686,9 +690,12 @@ fn video_loop(
         }
         // 1) Capture one frame (GPU texture). Timeout keeps the loop responsive.
         let t_cap = std::time::Instant::now();
-        let frame = match capturer.acquire_frame(16) {
-            Ok(Some(f)) => f,
-            Ok(None) => continue, // no new frame within timeout; try again
+        let (frame, fresh_capture) = match capturer.acquire_frame(16) {
+            Ok(Some(f)) => (f, true),
+            Ok(None) => match frame_cache.as_ref().and_then(GpuFrameCache::latest) {
+                Some(f) => (f, false),
+                None => continue,
+            },
             Err(g9_core::Error::CaptureReinit) => {
                 tracing::warn!("capture target changed; reinitializing");
                 capturer = Capturer::new(&ctx, cfg.display_index)?;
@@ -696,8 +703,10 @@ fn video_loop(
             }
             Err(e) => return Err(e),
         };
-        metrics.capture_latency.observe(t_cap.elapsed());
-        PipelineCounters::inc(&metrics.counters.frames_captured);
+        if fresh_capture {
+            metrics.capture_latency.observe(t_cap.elapsed());
+            PipelineCounters::inc(&metrics.counters.frames_captured);
+        }
 
         // Rate-limit: if this frame arrived before its slot, drop it (don't encode).
         // We still counted the capture above (for capture-fps visibility) but skip
@@ -707,6 +716,19 @@ fn video_loop(
             continue;
         }
         next_frame_at = now + frame_interval;
+
+        // Copy only frames selected for encoding, avoiding an unnecessary 60 fps
+        // GPU copy when capture runs faster than the configured output rate.
+        if fresh_capture {
+            if let Some(cache) = frame_cache.as_mut() {
+                if let Err(e) = cache.update(&ctx, &frame) {
+                    cache_errors += 1;
+                    if cache_errors <= 5 || cache_errors % 300 == 0 {
+                        tracing::warn!("desktop frame-cache error #{cache_errors}: {e}");
+                    }
+                }
+            }
+        }
 
         // One-time geometry sanity check. The NV12 converter was initialized for
         // cfg.width x cfg.height, but DXGI captures the display's ACTUAL size. If

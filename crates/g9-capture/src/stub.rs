@@ -40,3 +40,21 @@ impl Capturer {
         Err(Error::Unsupported("capture is only available on Windows".into()))
     }
 }
+
+pub struct GpuFrameCache;
+
+impl GpuFrameCache {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn update(&mut self, _ctx: &D3DContext, _frame: &GpuTextureFrame) -> Result<()> {
+        Err(Error::Unsupported(
+            "GPU frame caching is only available on Windows".into(),
+        ))
+    }
+
+    pub fn latest(&self) -> Option<GpuTextureFrame> {
+        None
+    }
+}

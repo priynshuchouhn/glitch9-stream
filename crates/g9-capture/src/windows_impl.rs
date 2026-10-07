@@ -20,8 +20,8 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::Win32::Graphics::Dxgi::{
@@ -36,6 +36,68 @@ pub struct D3DContext {
     pub(crate) context: ID3D11DeviceContext,
     pub(crate) adapter: IDXGIAdapter1,
     pub(crate) feature_level: D3D_FEATURE_LEVEL,
+}
+
+/// Persistent GPU copy of the most recent desktop frame. DXGI owns an acquired
+/// duplication texture only until the next `AcquireNextFrame`, so the video loop
+/// cannot safely reuse that texture when the desktop stops presenting. Keeping a
+/// D3D11 copy lets camera-only changes continue to produce broadcast frames.
+pub struct GpuFrameCache {
+    texture: Option<ID3D11Texture2D>,
+    width: u32,
+    height: u32,
+}
+
+impl GpuFrameCache {
+    pub fn new() -> Self {
+        Self {
+            texture: None,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    pub fn update(&mut self, ctx: &D3DContext, frame: &GpuTextureFrame) -> Result<()> {
+        let source = frame
+            .texture()
+            .ok_or_else(|| Error::capture("captured frame has no D3D11 texture"))?;
+
+        unsafe {
+            if self.texture.is_none() || self.width != frame.width || self.height != frame.height {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                source.GetDesc(&mut desc);
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.CPUAccessFlags = 0;
+                desc.MiscFlags = 0;
+
+                let mut texture = None;
+                ctx.device()
+                    .CreateTexture2D(&desc, None, Some(&mut texture))
+                    .map_err(|e| Error::capture(format!("CreateTexture2D(frame cache): {e}")))?;
+                self.texture =
+                    Some(texture.ok_or_else(|| Error::capture("null frame-cache texture"))?);
+                self.width = frame.width;
+                self.height = frame.height;
+            }
+
+            ctx.context().CopyResource(
+                self.texture
+                    .as_ref()
+                    .expect("frame-cache texture created above"),
+                source,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn latest(&self) -> Option<GpuTextureFrame> {
+        self.texture.as_ref().map(|texture| GpuTextureFrame {
+            width: self.width,
+            height: self.height,
+            acquired_at: Instant::now(),
+            texture: Some(texture.clone()),
+        })
+    }
 }
 
 // D3D11 objects are not Send by default in the bindings; the pipeline confines all
