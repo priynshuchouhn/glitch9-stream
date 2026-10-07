@@ -98,6 +98,7 @@ impl WhepSubscriber {
                 // Inspect the negotiated codec so we depacketize/decode correctly:
                 // the publishing browser may send H.264 or VP8 for video.
                 let mime = track.codec().capability.mime_type.to_lowercase();
+                tracing::info!(target: "g9::whep-sub", "facecam track: kind={kind:?} codec={mime}");
                 tokio::spawn(async move {
                     if kind == RTPCodecType::Video {
                         if mime.contains("vp8") {

@@ -145,6 +145,11 @@ impl FacecamCompositor {
             }
         };
         if let Some((tex, w, h)) = decoded {
+            if self.cam_nv12.is_none() {
+                tracing::info!(
+                    "facecam: first camera frame decoded ({codec:?}) {w}x{h}; compositing"
+                );
+            }
             self.cam_nv12 = Some(tex);
             self.cam_w = w;
             self.cam_h = h;

@@ -224,9 +224,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         tracing::info!("facecam: stream ended; will try to re-subscribe");
                     }
                     Err(e) => {
-                        // Expected while the browser hasn't published yet; stays at
-                        // debug-ish info so a slow cam start doesn't spam warnings.
-                        tracing::debug!(
+                        // Expected while the browser hasn't published yet. Logged at
+                        // info so operators can see the facecam is waiting for the
+                        // publisher (vs a real failure) during go-live bring-up.
+                        tracing::info!(
                             "facecam: subscribe not ready ({e:#}); retrying in {backoff_ms}ms"
                         );
                     }
