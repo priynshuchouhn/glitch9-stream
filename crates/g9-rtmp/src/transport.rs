@@ -204,52 +204,85 @@ async fn run_publisher(
         let mut need_keyframe = true;
 
         // Drain media until a write errors, then reconnect.
+        //
+        // We coalesce writes: block for one message, then greedily drain whatever
+        // else is already buffered, writing each to the socket, and flush ONCE per
+        // batch. Flushing after every tiny audio/video message issues a syscall
+        // (and TLS record) per packet; under load that is slow enough to back the
+        // bounded queue up, drop video frames, and leave YouTube seeing a choppy
+        // ingest that flaps active/inactive and never finalizes past liveStarting.
         let conn_result: Result<()> = loop {
-            let msg = match rx.recv().await {
+            let first = match rx.recv().await {
                 Some(m) => m,
                 None => break Ok(()), // channel closed → shutting down
             };
-            match msg {
-                Msg::Video(f) => {
-                    if need_keyframe {
-                        if !f.is_key() {
-                            continue;
-                        }
-                        // Send the AVC sequence header from this keyframe's SPS/PPS.
-                        if let Some(ps) = &f.parameter_sets {
-                            if let Err(e) = client.send_video_sequence_header(ps).await {
-                                break Err(e);
+
+            // Process the blocking message plus any already-queued messages, then
+            // flush once. `wrote` guards against an empty flush when every message
+            // in the batch was skipped (e.g. pre-keyframe delta frames).
+            let mut batch = Some(first);
+            let mut wrote = false;
+            let batch_result: Result<()> = loop {
+                let msg = match batch.take() {
+                    Some(m) => m,
+                    None => match rx.try_recv() {
+                        Ok(m) => m,
+                        Err(_) => break Ok(()), // nothing more buffered → flush
+                    },
+                };
+                match msg {
+                    Msg::Video(f) => {
+                        if need_keyframe {
+                            if !f.is_key() {
+                                continue;
                             }
+                            // Send the AVC sequence header from this keyframe's SPS/PPS.
+                            if let Some(ps) = &f.parameter_sets {
+                                if let Err(e) = client.send_video_sequence_header(ps).await {
+                                    break Err(e);
+                                }
+                            }
+                            need_keyframe = false;
                         }
-                        need_keyframe = false;
-                    }
-                    let avcc = annexb_to_avcc(&f.data);
-                    let ts = PtsClock::to_millis(f.pts);
-                    if let Err(e) = client.send_video(&avcc, f.is_key(), ts).await {
-                        break Err(e);
-                    }
-                    bytes_sent.fetch_add(avcc.len() as u64, Ordering::Relaxed);
-                }
-                Msg::Audio(p) => {
-                    // The AAC AudioSpecificConfig arrives as the first `is_config` packet.
-                    if p.is_config {
-                        if let Err(e) = client.send_audio_sequence_header(&p.data).await {
+                        let avcc = annexb_to_avcc(&f.data);
+                        let ts = PtsClock::to_millis(f.pts);
+                        if let Err(e) = client.send_video(&avcc, f.is_key(), ts).await {
                             break Err(e);
                         }
-                        continue;
+                        wrote = true;
+                        bytes_sent.fetch_add(avcc.len() as u64, Ordering::Relaxed);
                     }
-                    if !client.audio_seq_sent() {
-                        // Haven't seen the config yet; skip audio until we do.
-                        continue;
+                    Msg::Audio(p) => {
+                        // The AAC AudioSpecificConfig arrives as the first `is_config` packet.
+                        if p.is_config {
+                            if let Err(e) = client.send_audio_sequence_header(&p.data).await {
+                                break Err(e);
+                            }
+                            wrote = true;
+                            continue;
+                        }
+                        if !client.audio_seq_sent() {
+                            // Haven't seen the config yet; skip audio until we do.
+                            continue;
+                        }
+                        let ts = PtsClock::to_millis(p.pts);
+                        if let Err(e) = client.send_audio(&p.data, ts).await {
+                            break Err(e);
+                        }
+                        wrote = true;
+                        bytes_sent.fetch_add(p.data.len() as u64, Ordering::Relaxed);
                     }
-                    let ts = PtsClock::to_millis(p.pts);
-                    if let Err(e) = client.send_audio(&p.data, ts).await {
-                        break Err(e);
-                    }
-                    bytes_sent.fetch_add(p.data.len() as u64, Ordering::Relaxed);
+                }
+            };
+
+            if let Err(e) = batch_result {
+                break Err(e);
+            }
+            if wrote {
+                if let Err(e) = client.flush().await {
+                    break Err(e);
                 }
             }
-            let _ = client.flush().await;
         };
 
         if let Err(e) = conn_result {
