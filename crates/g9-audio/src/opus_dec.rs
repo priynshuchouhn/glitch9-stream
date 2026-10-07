@@ -43,15 +43,11 @@ impl OpusDecoder {
 
     /// Decode one Opus packet to interleaved f32 PCM.
     pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>> {
-        use audiopus::packet::Packet;
-        use audiopus::MutSignals;
-        let input = Packet::try_from(packet)
-            .map_err(|e| Error::audio(format!("opus packet: {e}")))?;
-        let output = MutSignals::try_from(&mut self.scratch[..])
-            .map_err(|e| Error::audio(format!("opus output signals: {e}")))?;
+        // `decode_float` takes the input packet (None = packet loss concealment),
+        // an output buffer, and a FEC flag; returns the per-channel frame count.
         let frames = self
             .dec
-            .decode_float(Some(input), output, false)
+            .decode_float(Some(packet), &mut self.scratch[..], false)
             .map_err(|e| Error::audio(format!("opus decode: {e}")))?;
         let samples = frames * self.channels;
         Ok(self.scratch[..samples].to_vec())
