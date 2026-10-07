@@ -17,18 +17,19 @@ use crate::D3DContext;
 use g9_core::{Error, Result};
 
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D,
-};
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
 use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
 
 use crate::facecam_decode::H264Decoder;
 use crate::facecam_vp8::Vp8Decoder;
@@ -49,7 +50,6 @@ const OVERLAY_MARGIN_FRACTION: f32 = 0.02;
 
 pub struct FacecamCompositor {
     device: ID3D11Device,
-    context: ID3D11DeviceContext,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
@@ -66,6 +66,9 @@ pub struct FacecamCompositor {
     cam_nv12: Option<ID3D11Texture2D>,
     cam_w: u32,
     cam_h: u32,
+    /// Reusable BGRA render target containing game + facecam. Desktop duplication
+    /// textures are input-only and must never be used as a VP output surface.
+    composite_texture: ID3D11Texture2D,
 }
 
 impl FacecamCompositor {
@@ -83,10 +86,16 @@ impl FacecamCompositor {
 
             let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                InputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+                InputFrameRate: DXGI_RATIONAL {
+                    Numerator: 30,
+                    Denominator: 1,
+                },
                 InputWidth: width,
                 InputHeight: height,
-                OutputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+                OutputFrameRate: DXGI_RATIONAL {
+                    Numerator: 30,
+                    Denominator: 1,
+                },
                 OutputWidth: width,
                 OutputHeight: height,
                 Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
@@ -98,9 +107,30 @@ impl FacecamCompositor {
                 .CreateVideoProcessor(&enumerator, 0)
                 .map_err(|e| Error::capture(format!("VP create: {e}")))?;
 
+            let output_desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut composite_texture = None;
+            device
+                .CreateTexture2D(&output_desc, None, Some(&mut composite_texture))
+                .map_err(|e| Error::capture(format!("facecam composite texture: {e}")))?;
+            let composite_texture = composite_texture
+                .ok_or_else(|| Error::capture("null facecam composite texture"))?;
+
             Ok(Self {
                 device: device.clone(),
-                context,
                 video_device,
                 video_context,
                 enumerator,
@@ -113,6 +143,7 @@ impl FacecamCompositor {
                 cam_nv12: None,
                 cam_w: 0,
                 cam_h: 0,
+                composite_texture,
             })
         }
     }
@@ -157,19 +188,20 @@ impl FacecamCompositor {
         Ok(())
     }
 
-    /// Blend the latest camera frame into the bottom-right corner of `game`.
-    /// No-op (Ok) when no camera frame has been decoded yet.
-    pub fn composite_onto(&mut self, game: &GpuTextureFrame) -> Result<()> {
+    /// Blend game + latest camera into a separate render-target texture. DXGI
+    /// desktop-duplication textures cannot be VP output surfaces, so the caller
+    /// must use the returned frame for conversion/encoding.
+    pub fn composite(&mut self, game: &GpuTextureFrame) -> Result<Option<GpuTextureFrame>> {
         let cam = match self.cam_nv12.as_ref() {
             Some(c) => c.clone(),
-            None => return Ok(()),
+            None => return Ok(None),
         };
         let game_tex = game
             .texture()
             .ok_or_else(|| Error::capture("game frame has no texture"))?;
 
         unsafe {
-            // Output view over the game texture (destination of the blend).
+            // Output view over our render target, never over the captured desktop.
             let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
                 ..Default::default()
@@ -177,21 +209,32 @@ impl FacecamCompositor {
             let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
             self.video_device
                 .CreateVideoProcessorOutputView(
-                    game_tex,
+                    &self.composite_texture,
                     &self.enumerator,
                     &out_desc,
                     Some(&mut output_view),
                 )
                 .map_err(|e| Error::capture(format!("VP output view: {e}")))?;
-            let output_view =
-                output_view.ok_or_else(|| Error::capture("null VP output view"))?;
+            let output_view = output_view.ok_or_else(|| Error::capture("null VP output view"))?;
 
-            // Input view over the camera NV12 texture.
+            // Input view 0: full-size BGRA game frame.
             let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0,
                 ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
                 ..Default::default()
             };
+            let mut game_view = None;
+            self.video_device
+                .CreateVideoProcessorInputView(
+                    game_tex,
+                    &self.enumerator,
+                    &in_desc,
+                    Some(&mut game_view),
+                )
+                .map_err(|e| Error::capture(format!("VP game input view: {e}")))?;
+            let game_view = game_view.ok_or_else(|| Error::capture("null VP game input view"))?;
+
+            // Input view 1: decoded camera NV12 texture.
             let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
             self.video_device
                 .CreateVideoProcessorInputView(
@@ -201,8 +244,7 @@ impl FacecamCompositor {
                     Some(&mut input_view),
                 )
                 .map_err(|e| Error::capture(format!("VP input view: {e}")))?;
-            let input_view =
-                input_view.ok_or_else(|| Error::capture("null VP input view"))?;
+            let input_view = input_view.ok_or_else(|| Error::capture("null VP input view"))?;
 
             // Destination rectangle: bottom-right corner overlay, preserving 16:9.
             let margin = (self.width as f32 * OVERLAY_MARGIN_FRACTION) as i32;
@@ -217,23 +259,47 @@ impl FacecamCompositor {
                 bottom,
             };
 
-            // Blend the camera stream into the destination rect over the game. The
-            // game pixels outside the rect are preserved (background enabled off,
-            // single stream drawn into a sub-rect of the existing render target).
-            self.video_context
-                .VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&dest));
-
-            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
-                Enable: true.into(),
-                OutputIndex: 0,
-                InputFrameOrField: 0,
-                pInputSurface: std::mem::ManuallyDrop::new(Some(input_view.clone())),
-                ..Default::default()
+            let full = RECT {
+                left: 0,
+                top: 0,
+                right: self.width as i32,
+                bottom: self.height as i32,
             };
+            self.video_context.VideoProcessorSetStreamDestRect(
+                &self.processor,
+                0,
+                true,
+                Some(&full),
+            );
+            self.video_context.VideoProcessorSetStreamDestRect(
+                &self.processor,
+                1,
+                true,
+                Some(&dest),
+            );
             self.video_context
-                .VideoProcessorBlt(&self.processor, &output_view, 0, &[stream])
+                .VideoProcessorSetStreamAlpha(&self.processor, 1, true, 1.0);
+
+            let streams = [
+                D3D11_VIDEO_PROCESSOR_STREAM {
+                    Enable: true.into(),
+                    pInputSurface: std::mem::ManuallyDrop::new(Some(game_view)),
+                    ..Default::default()
+                },
+                D3D11_VIDEO_PROCESSOR_STREAM {
+                    Enable: true.into(),
+                    pInputSurface: std::mem::ManuallyDrop::new(Some(input_view)),
+                    ..Default::default()
+                },
+            ];
+            self.video_context
+                .VideoProcessorBlt(&self.processor, &output_view, 0, &streams)
                 .map_err(|e| Error::capture(format!("VideoProcessorBlt: {e}")))?;
         }
-        Ok(())
+        Ok(Some(GpuTextureFrame::from_texture(
+            self.composite_texture.clone(),
+            self.width,
+            self.height,
+        )))
     }
 }

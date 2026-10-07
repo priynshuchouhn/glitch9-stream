@@ -40,10 +40,20 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
 
     // --- Build encoder profiles for the requested outputs ---
     let webrtc_profile = cfg.outputs.webrtc.then(|| {
-        EncoderProfile::webrtc(cfg.video.width, cfg.video.height, cfg.video.fps, cfg.video.bitrate_bps)
+        EncoderProfile::webrtc(
+            cfg.video.width,
+            cfg.video.height,
+            cfg.video.fps,
+            cfg.video.bitrate_bps,
+        )
     });
     let youtube_profile = cfg.outputs.youtube.then(|| {
-        EncoderProfile::youtube(cfg.video.width, cfg.video.height, cfg.video.fps, cfg.video.bitrate_bps)
+        EncoderProfile::youtube(
+            cfg.video.width,
+            cfg.video.height,
+            cfg.video.fps,
+            cfg.video.bitrate_bps,
+        )
     });
 
     // --- Decide Mode A (shared encoder) vs Mode B (dual encoders) ---
@@ -67,7 +77,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             // viewers (handles NAT/scale). On-connect IDR is driven by the SFU's
             // RTCP (PLI); force a keyframe periodically via the normal GOP.
             Some(whip) => {
-                let public_ip = std::env::var("G9_PUBLIC_IP").ok().filter(|s| !s.trim().is_empty());
+                let public_ip = std::env::var("G9_PUBLIC_IP")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty());
                 let t = Arc::new(g9_webrtc::WhipTransport::new(
                     whip.url.clone(),
                     whip.token.clone(),
@@ -160,16 +172,22 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         let interval_s = stats_interval.as_secs_f64();
         loop {
             ticker.tick().await;
-            prev = print_metrics(&metrics_for_stats, &transports_for_stats, geom, interval_s, prev);
+            prev = print_metrics(
+                &metrics_for_stats,
+                &transports_for_stats,
+                geom,
+                interval_s,
+                prev,
+            );
             if let Some(path) = ready_file.as_deref() {
                 let current_whip_bytes = transports_for_stats.iter().find_map(|transport| {
                     let stats = transport.stats();
                     (transport.name() == "whip"
                         && stats.state == Some(g9_core::transport::TransportState::Connected))
-                        .then(|| stats.bytes_sent.unwrap_or(0))
+                    .then(|| stats.bytes_sent.unwrap_or(0))
                 });
-                let publishing = current_whip_bytes
-                    .is_some_and(|bytes| bytes > previous_whip_bytes);
+                let publishing =
+                    current_whip_bytes.is_some_and(|bytes| bytes > previous_whip_bytes);
                 previous_whip_bytes = current_whip_bytes.unwrap_or(0);
                 if publishing {
                     let _ = std::fs::write(path, b"ready\n");
@@ -336,7 +354,10 @@ fn audio_loop(
     let actual_channels = capture.channels();
     tracing::info!(
         "audio capture format: {} Hz, {} ch (requested {} Hz, {} ch)",
-        actual_rate, actual_channels, audio_cfg.sample_rate, audio_cfg.channels
+        actual_rate,
+        actual_channels,
+        audio_cfg.sample_rate,
+        audio_cfg.channels
     );
     if actual_rate != 48000 {
         tracing::info!(
@@ -410,7 +431,9 @@ fn audio_loop(
                             mic_packets_received += 1;
                             mic_samples.extend(resample_stereo(&mic_pcm, 48_000, actual_rate));
                             if mic_packets_received == 1 {
-                                tracing::info!("facecam microphone: receiving and mixing Opus audio");
+                                tracing::info!(
+                                    "facecam microphone: receiving and mixing Opus audio"
+                                );
                             }
                         }
                     }
@@ -562,7 +585,13 @@ fn spawn_video_thread(
         .name("g9-video".into())
         .spawn(move || {
             if let Err(e) = video_loop(
-                cfg, mode, transports, metrics, force_keyframe, abr_target, facecam,
+                cfg,
+                mode,
+                transports,
+                metrics,
+                force_keyframe,
+                abr_target,
+                facecam,
             ) {
                 tracing::error!("video pipeline stopped: {e}");
             }
@@ -691,13 +720,18 @@ fn video_loop(
                     "GEOMETRY MISMATCH: captured display is {}x{} but engine is encoding \
                      {}x{}. This usually causes a BLACK stream. Re-run with \
                      --width {} --height {} to match the display.",
-                    frame.width, frame.height, cfg.width, cfg.height,
-                    frame.width, frame.height
+                    frame.width,
+                    frame.height,
+                    cfg.width,
+                    cfg.height,
+                    frame.width,
+                    frame.height
                 );
             } else {
                 tracing::info!(
                     "capture geometry OK: {}x{} matches encode size",
-                    frame.width, frame.height
+                    frame.width,
+                    frame.height
                 );
             }
         }
@@ -705,6 +739,7 @@ fn video_loop(
         // 1b) Composite the facecam over the game texture (GPU) when present. The
         // compositor pulls the newest decoded camera frame and blends it into a
         // corner of `frame`; on any error it leaves the game frame untouched.
+        let mut composited_frame = None;
         if let (Some(comp), Some(fc)) = (compositor.as_mut(), facecam.as_ref()) {
             if let Some((codec, au)) = fc.take_video() {
                 facecam_takes += 1;
@@ -720,10 +755,9 @@ fn video_loop(
                     }
                 }
             }
-            if let Err(e) = comp.composite_onto(&frame) {
-                if facecam_takes <= 10 {
-                    tracing::info!("facecam composite error: {e}");
-                }
+            match comp.composite(&frame) {
+                Ok(output) => composited_frame = output,
+                Err(e) => tracing::warn!("facecam composite error: {e}"),
             }
         }
 
@@ -731,7 +765,8 @@ fn video_loop(
         // NOTE: we never Map()/read the pixels to system memory, so
         // counters.cpu_readbacks stays 0 by construction (asserted in metrics).
         let t_cvt = std::time::Instant::now();
-        let nv12 = converter.convert(&frame)?;
+        let frame_to_convert = composited_frame.as_ref().unwrap_or(&frame);
+        let nv12 = converter.convert(frame_to_convert)?;
         metrics.convert_latency.observe(t_cvt.elapsed());
         PipelineCounters::inc(&metrics.counters.frames_converted);
 
