@@ -19,7 +19,7 @@ use g9_core::frame::SharedEncodedFrame;
 use g9_core::transport::{AudioPacket, MediaTransport, TransportState, TransportStats};
 use g9_core::Result;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -30,7 +30,11 @@ const BACKOFF_START_MS: u64 = 1000;
 const BACKOFF_MAX_MS: u64 = 16_000;
 
 enum Msg {
-    Video(SharedEncodedFrame),
+    Video {
+        frame: SharedEncodedFrame,
+        /// This IDR is the decoder-safe boundary after queue overflow.
+        resync: bool,
+    },
     Audio(AudioPacket),
 }
 
@@ -43,10 +47,15 @@ pub struct RtmpTransport {
     bytes_sent: Arc<AtomicU64>,
     reconnects: Arc<AtomicU32>,
     dropped: Arc<AtomicU64>,
+    /// Set after any video enqueue failure. While set, media is discarded until
+    /// an IDR is accepted and consumed by the publisher.
+    awaiting_keyframe: Arc<AtomicBool>,
+    /// Shared pipeline flag used to ask NVENC for an IDR immediately.
+    force_keyframe: Arc<AtomicBool>,
 }
 
 impl RtmpTransport {
-    pub fn new(name: impl Into<String>, cfg: RtmpConfig) -> Self {
+    pub fn new(name: impl Into<String>, cfg: RtmpConfig, force_keyframe: Arc<AtomicBool>) -> Self {
         let (tx, rx) = mpsc::channel(VIDEO_QUEUE_DEPTH + AUDIO_QUEUE_DEPTH);
         Self {
             name: name.into(),
@@ -57,6 +66,8 @@ impl RtmpTransport {
             bytes_sent: Arc::new(AtomicU64::new(0)),
             reconnects: Arc::new(AtomicU32::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
+            awaiting_keyframe: Arc::new(AtomicBool::new(false)),
+            force_keyframe,
         }
     }
 
@@ -96,26 +107,60 @@ impl MediaTransport for RtmpTransport {
         let bytes_sent = self.bytes_sent.clone();
         let reconnects = self.reconnects.clone();
         let dropped = self.dropped.clone();
+        let awaiting_keyframe = self.awaiting_keyframe.clone();
         let url = self.cfg.url.clone();
         let key = self.cfg.stream_key.clone();
 
         tokio::spawn(async move {
-            run_publisher(url, key, rx, state, bytes_sent, reconnects, dropped).await;
+            run_publisher(
+                url,
+                key,
+                rx,
+                state,
+                bytes_sent,
+                reconnects,
+                dropped,
+                awaiting_keyframe,
+            )
+            .await;
         });
         Ok(())
     }
 
     fn send_video(&self, frame: SharedEncodedFrame) {
-        match self.tx.try_send(Msg::Video(frame)) {
+        let recovering = self.awaiting_keyframe.load(Ordering::Acquire);
+        if recovering && !frame.is_key() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        match self.tx.try_send(Msg::Video {
+            frame,
+            resync: recovering,
+        }) {
             Ok(_) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                // An isolated missing P-frame makes every following P-frame
+                // undecodable. Drop through an IDR instead and request it now.
+                if !self.awaiting_keyframe.swap(true, Ordering::AcqRel) {
+                    tracing::warn!(
+                        target: "g9::rtmp",
+                        "RTMP queue overflow; dropping media until a recovery IDR"
+                    );
+                }
+                self.force_keyframe.store(true, Ordering::Release);
             }
             Err(_) => {}
         }
     }
 
     fn send_audio(&self, packet: AudioPacket) {
+        // Let the queue drain promptly so the recovery IDR cannot be starved by
+        // audio arriving while the uplink is congested.
+        if self.awaiting_keyframe.load(Ordering::Acquire) {
+            return;
+        }
         let _ = self.tx.try_send(Msg::Audio(packet));
     }
 
@@ -157,6 +202,7 @@ async fn run_publisher(
     bytes_sent: Arc<AtomicU64>,
     reconnects: Arc<AtomicU32>,
     _dropped: Arc<AtomicU64>,
+    awaiting_keyframe: Arc<AtomicBool>,
 ) {
     use g9_core::h264::annexb_to_avcc;
     use g9_core::time::PtsClock;
@@ -231,7 +277,13 @@ async fn run_publisher(
                     },
                 };
                 match msg {
-                    Msg::Video(f) => {
+                    Msg::Video { frame: f, resync } => {
+                        // Once an overflow is known, queued media from before the
+                        // producer noticed it is stale. Discard it rapidly until
+                        // the explicitly marked recovery IDR reaches the head.
+                        if awaiting_keyframe.load(Ordering::Acquire) && !resync {
+                            continue;
+                        }
                         if need_keyframe {
                             if !f.is_key() {
                                 continue;
@@ -244,6 +296,16 @@ async fn run_publisher(
                             }
                             need_keyframe = false;
                         }
+                        if resync {
+                            // A decoder configuration record is required at the
+                            // new boundary even though this RTMP connection did
+                            // not reconnect.
+                            if let Some(ps) = &f.parameter_sets {
+                                if let Err(e) = client.send_video_sequence_header(ps).await {
+                                    break Err(e);
+                                }
+                            }
+                        }
                         let avcc = annexb_to_avcc(&f.data);
                         let ts = PtsClock::to_millis(f.pts);
                         if let Err(e) = client.send_video(&avcc, f.is_key(), ts).await {
@@ -251,8 +313,18 @@ async fn run_publisher(
                         }
                         wrote = true;
                         bytes_sent.fetch_add(avcc.len() as u64, Ordering::Relaxed);
+                        if resync {
+                            awaiting_keyframe.store(false, Ordering::Release);
+                            tracing::info!(
+                                target: "g9::rtmp",
+                                "RTMP video recovered at IDR boundary"
+                            );
+                        }
                     }
                     Msg::Audio(p) => {
+                        if awaiting_keyframe.load(Ordering::Acquire) {
+                            continue;
+                        }
                         // The AAC AudioSpecificConfig arrives as the first `is_config` packet.
                         if p.is_config {
                             if let Err(e) = client.send_audio_sequence_header(&p.data).await {
@@ -309,6 +381,42 @@ fn redact(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use g9_core::config::Secret;
+    use g9_core::frame::{EncodedFrame, FrameKind, VideoCodec};
+
+    fn transport(force_keyframe: Arc<AtomicBool>) -> RtmpTransport {
+        RtmpTransport::new(
+            "test",
+            RtmpConfig {
+                url: "rtmp://localhost/live".into(),
+                stream_key: Secret::new("test"),
+            },
+            force_keyframe,
+        )
+    }
+
+    fn frame(kind: FrameKind) -> SharedEncodedFrame {
+        Arc::new(EncodedFrame {
+            codec: VideoCodec::H264,
+            kind,
+            data: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
+            annex_b: true,
+            pts: Duration::ZERO,
+            dts: Duration::ZERO,
+            parameter_sets: None,
+        })
+    }
+
+    fn audio() -> AudioPacket {
+        AudioPacket {
+            data: Bytes::from_static(&[1]),
+            pts: Duration::ZERO,
+            sample_rate: 48_000,
+            channels: 2,
+            is_config: false,
+        }
+    }
 
     #[test]
     fn backoff_is_bounded_and_exponential() {
@@ -325,6 +433,45 @@ mod tests {
 
     #[test]
     fn redacts_key_in_url() {
-        assert_eq!(redact("rtmps://x.youtube.com/live2/SECRET"), "rtmps://x.youtube.com/live2/***");
+        assert_eq!(
+            redact("rtmps://x.youtube.com/live2/SECRET"),
+            "rtmps://x.youtube.com/live2/***"
+        );
+    }
+
+    #[test]
+    fn overflow_drops_deltas_and_requests_recovery_idr() {
+        let force_keyframe = Arc::new(AtomicBool::new(false));
+        let transport = transport(force_keyframe.clone());
+
+        // Saturate the bounded queue, then fail to enqueue a delta frame.
+        for _ in 0..(VIDEO_QUEUE_DEPTH + AUDIO_QUEUE_DEPTH) {
+            transport.send_audio(audio());
+        }
+        transport.send_video(frame(FrameKind::Delta));
+
+        assert!(transport.awaiting_keyframe.load(Ordering::Acquire));
+        assert!(force_keyframe.load(Ordering::Acquire));
+        assert_eq!(transport.dropped.load(Ordering::Relaxed), 1);
+
+        // Further delta frames must not enter the queue. Free one slot and verify
+        // the next IDR is explicitly marked as the decoder resync boundary.
+        let mut rx = transport.inner_rx.lock().take().unwrap();
+        let _ = rx.try_recv().unwrap();
+        transport.send_video(frame(FrameKind::Delta));
+        assert_eq!(transport.dropped.load(Ordering::Relaxed), 2);
+        transport.send_video(frame(FrameKind::Key));
+
+        let mut recovery_seen = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let Msg::Video { frame, resync } = msg {
+                assert!(frame.is_key());
+                assert!(resync);
+                recovery_seen = true;
+            }
+        }
+        assert!(recovery_seen);
+        // Only the publisher clears this after it has actually emitted the IDR.
+        assert!(transport.awaiting_keyframe.load(Ordering::Acquire));
     }
 }

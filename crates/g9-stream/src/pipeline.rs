@@ -104,7 +104,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             .as_ref()
             .expect("rtmp config present when youtube output enabled")
             .clone();
-        let t = Arc::new(g9_rtmp::RtmpTransport::new("youtube", rtmp));
+        let t = Arc::new(g9_rtmp::RtmpTransport::new(
+            "youtube",
+            rtmp,
+            force_keyframe.clone(),
+        ));
         transports.push(t);
     }
 
