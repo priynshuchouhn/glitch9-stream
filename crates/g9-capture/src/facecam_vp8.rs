@@ -26,15 +26,17 @@ use windows::Win32::Graphics::Dxgi::Common::{
 
 // The package is `env-libvpx-sys` but its library crate is named `vpx_sys`.
 use vpx_sys::{
-    vpx_codec_ctx_t, vpx_codec_dec_init_ver, vpx_codec_decode, vpx_codec_get_frame,
-    vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_image_t, vpx_img_fmt, VPX_DECODER_ABI_VERSION,
+    vpx_codec_ctx_t, vpx_codec_dec_init_ver, vpx_codec_decode, vpx_codec_err_t,
+    vpx_codec_get_frame, vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_image_t, vpx_img_fmt,
+    VPX_DECODER_ABI_VERSION,
 };
 
 /// libvpx realtime decode deadline (`VPX_DL_REALTIME` == 1): decode immediately
 /// without extra post-processing, matching a low-latency live facecam.
 const VPX_DL_REALTIME: std::os::raw::c_long = 1;
-/// Success code from libvpx (`VPX_CODEC_OK`).
-const VPX_CODEC_OK: i32 = 0;
+/// Success code from libvpx. `vpx_codec_err_t` is a `#[repr(u32)]` enum whose OK
+/// variant is 0; comparing against this constant keeps the call sites readable.
+const VPX_CODEC_OK: vpx_codec_err_t = vpx_codec_err_t::VPX_CODEC_OK;
 
 /// Decodes VP8 frames into NV12 D3D11 textures via libvpx + a CPU I420->NV12 upload.
 pub struct Vp8Decoder {
@@ -70,7 +72,7 @@ impl Vp8Decoder {
             );
             if err != VPX_CODEC_OK {
                 return Err(Error::capture(format!(
-                    "libvpx: vpx_codec_dec_init failed ({err})"
+                    "libvpx: vpx_codec_dec_init failed ({err:?})"
                 )));
             }
             Ok(Self {
@@ -101,7 +103,7 @@ impl Vp8Decoder {
             );
             if err != VPX_CODEC_OK {
                 // A corrupt/partial frame is non-fatal; skip it and keep the stream.
-                tracing::debug!("libvpx: vpx_codec_decode error {err}; skipping frame");
+                tracing::debug!("libvpx: vpx_codec_decode error {err:?}; skipping frame");
                 return Ok(None);
             }
 
