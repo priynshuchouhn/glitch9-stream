@@ -291,13 +291,62 @@ async fn whep_post(url: &str, sdp_offer: &str) -> anyhow::Result<(String, Option
     if !(status_line.contains(" 201") || status_line.contains(" 200")) {
         anyhow::bail!("WHEP server returned: {status_line} — body: {}", body.trim());
     }
+    // MediaMTX returns the WHEP SDP answer with Transfer-Encoding: chunked. The raw
+    // body then starts with a hex chunk-size line (e.g. "8a1\r\n...") which is NOT
+    // valid SDP and makes the parser fail with `SdpInvalidSyntax: <chunk-size>`.
+    // De-chunk when the header advertises chunked encoding before parsing the SDP.
+    let is_chunked = head
+        .lines()
+        .any(|l| {
+            let l = l.to_ascii_lowercase();
+            l.starts_with("transfer-encoding:") && l.contains("chunked")
+        });
+    let sdp = if is_chunked {
+        dechunk_body(body)
+    } else {
+        body.to_string()
+    };
     // Resolve the resource URL from the Location header (relative or absolute).
     let location = head
         .lines()
         .find_map(|l| l.strip_prefix("Location:").or_else(|| l.strip_prefix("location:")))
         .map(|v| v.trim().to_string())
         .map(|loc| resolve_location(url, &loc));
-    Ok((body.to_string(), location))
+    Ok((sdp, location))
+}
+
+/// Decode an HTTP/1.1 chunked-transfer-encoded body into its payload. Each chunk is
+/// `<hex-size>\r\n<data>\r\n`, terminated by a zero-size chunk. Returns the
+/// concatenated chunk data (the WHEP SDP answer).
+fn dechunk_body(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Read the chunk-size line up to CRLF.
+        let line_end = match find_crlf(&bytes[i..]) {
+            Some(p) => i + p,
+            None => break,
+        };
+        let size_str = std::str::from_utf8(&bytes[i..line_end]).unwrap_or("").trim();
+        // Chunk size may carry extensions after ';'; take the hex part only.
+        let hex = size_str.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(hex, 16).unwrap_or(0);
+        if size == 0 {
+            break; // final chunk
+        }
+        let data_start = line_end + 2; // skip CRLF after the size line
+        let data_end = (data_start + size).min(bytes.len());
+        out.extend_from_slice(&bytes[data_start..data_end]);
+        // Advance past the chunk data and its trailing CRLF.
+        i = data_end + 2;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Index of the first CRLF in `bytes`, if present.
+fn find_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|w| w == b"\r\n")
 }
 
 /// DELETE the WHEP resource to release the SFU subscriber (best-effort).
