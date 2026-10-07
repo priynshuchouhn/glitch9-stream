@@ -29,6 +29,13 @@ pub struct H264Decoder {
     device_manager: IMFDXGIDeviceManager,
     transform: IMFTransform,
     configured: bool,
+    /// Reusable NV12 texture for the software-decode fallback (system-memory MF
+    /// samples copied to the GPU), sized to the current frame; recreated on resize.
+    sw_texture: Option<ID3D11Texture2D>,
+    sw_w: u32,
+    sw_h: u32,
+    /// Scratch NV12 buffer reused across software-decoded frames.
+    sw_nv12: Vec<u8>,
 }
 
 impl H264Decoder {
@@ -58,6 +65,10 @@ impl H264Decoder {
                 device_manager,
                 transform,
                 configured: false,
+                sw_texture: None,
+                sw_w: 0,
+                sw_h: 0,
+                sw_nv12: Vec::new(),
             })
         }
     }
@@ -106,7 +117,134 @@ impl H264Decoder {
             Some(s) => s,
             None => return Ok(None),
         };
-        extract_texture(&sample)
+        self.sample_to_texture(&sample)
+    }
+
+    /// Turn a decoded MF sample into an NV12 D3D11 texture. GPU (IMFDXGIBuffer)
+    /// samples are used directly; software (system-memory) samples — the only kind
+    /// this VM's software H.264 decoder produces — are copied into a reusable
+    /// D3D11 NV12 texture so the compositor can still blend the facecam.
+    unsafe fn sample_to_texture(
+        &mut self,
+        sample: &IMFSample,
+    ) -> Result<Option<(ID3D11Texture2D, u32, u32)>> {
+        use windows::Win32::Media::MediaFoundation::IMFDXGIBuffer;
+
+        let buffer = sample
+            .GetBufferByIndex(0)
+            .map_err(|e| Error::capture(format!("GetBufferByIndex: {e}")))?;
+
+        // Fast path: GPU-backed sample exposes IMFDXGIBuffer wrapping the texture.
+        if let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() {
+            let mut texture: Option<ID3D11Texture2D> = None;
+            dxgi.GetResource(
+                &ID3D11Texture2D::IID,
+                &mut texture as *mut _ as *mut *mut core::ffi::c_void,
+            )
+            .map_err(|e| Error::capture(format!("GetResource: {e}")))?;
+            if let Some(t) = texture {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                t.GetDesc(&mut desc);
+                return Ok(Some((t, desc.Width, desc.Height)));
+            }
+            return Ok(None);
+        }
+
+        // Software path: copy the system-memory NV12 into a D3D11 texture.
+        self.upload_software_nv12(&buffer)
+    }
+
+    /// Copy a system-memory NV12 MF buffer into a reusable D3D11 NV12 texture.
+    unsafe fn upload_software_nv12(
+        &mut self,
+        buffer: &windows::Win32::Media::MediaFoundation::IMFMediaBuffer,
+    ) -> Result<Option<(ID3D11Texture2D, u32, u32)>> {
+        // Resolve the current output frame size from the MFT output media type.
+        let (w, h) = self.output_dimensions()?;
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+
+        let mut ptr: *mut u8 = std::ptr::null_mut();
+        let mut cur_len: u32 = 0;
+        buffer
+            .Lock(&mut ptr, None, Some(&mut cur_len))
+            .map_err(|e| Error::capture(format!("sw buffer Lock: {e}")))?;
+        // NV12: Y plane (w*h) followed by interleaved UV (w*h/2). Copy the packed
+        // buffer verbatim; MF's system-memory NV12 is tightly packed at `w`.
+        let needed = (w * h + w * (h / 2)) as usize;
+        let copy_len = needed.min(cur_len as usize);
+        if self.sw_nv12.len() != needed {
+            self.sw_nv12.resize(needed, 0);
+        }
+        std::ptr::copy_nonoverlapping(ptr, self.sw_nv12.as_mut_ptr(), copy_len);
+        let _ = buffer.Unlock();
+
+        self.ensure_sw_texture(w, h)?;
+        let texture = match self.sw_texture.as_ref() {
+            Some(t) => t.clone(),
+            None => return Ok(None),
+        };
+        let context = self
+            .device
+            .GetImmediateContext()
+            .map_err(|e| Error::capture(format!("GetImmediateContext: {e}")))?;
+        context.UpdateSubresource(
+            &texture,
+            0,
+            None,
+            self.sw_nv12.as_ptr() as *const core::ffi::c_void,
+            w,
+            w * h,
+        );
+        Ok(Some((texture, w, h)))
+    }
+
+    /// Current decoder output frame size from the MFT output media type.
+    unsafe fn output_dimensions(&self) -> Result<(u32, u32)> {
+        use windows::Win32::Media::MediaFoundation::MF_MT_FRAME_SIZE;
+        let out_type = self
+            .transform
+            .GetOutputCurrentType(0)
+            .map_err(|e| Error::capture(format!("GetOutputCurrentType: {e}")))?;
+        let packed = out_type
+            .GetUINT64(&MF_MT_FRAME_SIZE)
+            .map_err(|e| Error::capture(format!("get frame size: {e}")))?;
+        // MF packs width in the high 32 bits, height in the low 32 bits.
+        let w = (packed >> 32) as u32;
+        let h = (packed & 0xFFFF_FFFF) as u32;
+        Ok((w, h))
+    }
+
+    /// (Re)create the reusable software-decode NV12 texture on a size change.
+    unsafe fn ensure_sw_texture(&mut self, w: u32, h: u32) -> Result<()> {
+        if self.sw_texture.is_some() && self.sw_w == w && self.sw_h == h {
+            return Ok(());
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        self.device
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .map_err(|e| Error::capture(format!("CreateTexture2D(sw NV12): {e}")))?;
+        self.sw_texture = texture;
+        self.sw_w = w;
+        self.sw_h = h;
+        self.sw_nv12.clear();
+        Ok(())
     }
 }
 
@@ -208,34 +346,4 @@ unsafe fn wrap_annex_b_sample(annex_b: &[u8]) -> Result<IMFSample> {
 }
 
 /// Extract the D3D11 NV12 texture from a decoded sample's DXGI buffer.
-unsafe fn extract_texture(
-    sample: &IMFSample,
-) -> Result<Option<(ID3D11Texture2D, u32, u32)>> {
-    use windows::Win32::Media::MediaFoundation::IMFDXGIBuffer;
 
-    let buffer = sample
-        .GetBufferByIndex(0)
-        .map_err(|e| Error::capture(format!("GetBufferByIndex: {e}")))?;
-    // D3D11-backed output exposes IMFDXGIBuffer wrapping the texture.
-    let dxgi: IMFDXGIBuffer = match buffer.cast() {
-        Ok(d) => d,
-        // Software-decoded sample (system memory) — skip; we only composite GPU
-        // textures. A HW MFT bound to our device yields IMFDXGIBuffer.
-        Err(_) => return Ok(None),
-    };
-    let mut texture: Option<ID3D11Texture2D> = None;
-    dxgi.GetResource(
-        &ID3D11Texture2D::IID,
-        &mut texture as *mut _ as *mut *mut core::ffi::c_void,
-    )
-    .map_err(|e| Error::capture(format!("GetResource: {e}")))?;
-    let texture = match texture {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    texture.GetDesc(&mut desc);
-    // Avoid unused-import lints while keeping the texture-desc path meaningful.
-    let _ = (DXGI_FORMAT_NV12, D3D11_BIND_DECODER, D3D11_USAGE_DEFAULT);
-    Ok(Some((texture, desc.Width, desc.Height)))
-}
