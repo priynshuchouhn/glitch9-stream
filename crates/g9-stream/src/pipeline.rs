@@ -201,7 +201,17 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                                 break;
                             }
                             match sample {
-                                g9_webrtc::FacecamSample::Video(au) => state.push_video(au),
+                                g9_webrtc::FacecamSample::Video(codec, au) => {
+                                    let codec = match codec {
+                                        g9_webrtc::FacecamVideoCodec::H264 => {
+                                            g9_capture::FacecamCodec::H264
+                                        }
+                                        g9_webrtc::FacecamVideoCodec::Vp8 => {
+                                            g9_capture::FacecamCodec::Vp8
+                                        }
+                                    };
+                                    state.push_video(codec, au);
+                                }
                                 g9_webrtc::FacecamSample::Audio(pkt) => state.push_audio(pkt),
                             }
                         }
@@ -616,8 +626,8 @@ fn video_loop(
         // compositor pulls the newest decoded camera frame and blends it into a
         // corner of `frame`; on any error it leaves the game frame untouched.
         if let (Some(comp), Some(fc)) = (compositor.as_mut(), facecam.as_ref()) {
-            if let Some(au) = fc.take_video() {
-                if let Err(e) = comp.update_camera(&au) {
+            if let Some((codec, au)) = fc.take_video() {
+                if let Err(e) = comp.update_camera(codec, &au) {
                     tracing::debug!("facecam decode skipped: {e}");
                 }
             }

@@ -9,4 +9,4 @@ mod whep_sub;
 
 pub use transport::WebRtcTransport;
 pub use whip::WhipTransport;
-pub use whep_sub::{FacecamSample, WhepSubscriber};
+pub use whep_sub::{FacecamSample, FacecamVideoCodec, WhepSubscriber};

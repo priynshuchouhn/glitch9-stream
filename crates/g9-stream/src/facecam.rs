@@ -8,6 +8,7 @@
 //! design: a cam frame or two dropped under load never stalls the game pipeline.
 
 use bytes::Bytes;
+use g9_capture::FacecamCodec;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,9 +24,10 @@ pub struct FacecamState {
 }
 
 struct Inner {
-    /// Most recent H.264 access unit (Annex-B) from the camera, if any. Replaced
-    /// each time a newer one arrives — the compositor only needs the latest frame.
-    latest_video: Mutex<Option<Bytes>>,
+    /// Most recent camera video frame + its codec (H.264 Annex-B or VP8), if any.
+    /// Replaced each time a newer one arrives — the compositor only needs the
+    /// latest frame — and tagged so the compositor selects the right decoder.
+    latest_video: Mutex<Option<(FacecamCodec, Bytes)>>,
     /// Queued Opus mic packets awaiting mix into the broadcast audio.
     audio_queue: Mutex<VecDeque<Bytes>>,
 }
@@ -40,13 +42,13 @@ impl FacecamState {
         }
     }
 
-    /// Store the newest camera access unit (replacing any un-consumed one).
-    pub fn push_video(&self, au: Bytes) {
-        *self.inner.latest_video.lock() = Some(au);
+    /// Store the newest camera frame + codec (replacing any un-consumed one).
+    pub fn push_video(&self, codec: FacecamCodec, au: Bytes) {
+        *self.inner.latest_video.lock() = Some((codec, au));
     }
 
-    /// Take the latest camera access unit, if a new one has arrived since last call.
-    pub fn take_video(&self) -> Option<Bytes> {
+    /// Take the latest camera frame + codec, if a new one arrived since last call.
+    pub fn take_video(&self) -> Option<(FacecamCodec, Bytes)> {
         self.inner.latest_video.lock().take()
     }
 

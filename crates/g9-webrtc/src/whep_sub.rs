@@ -24,10 +24,20 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::track::track_remote::TrackRemote;
 
+/// Which video codec a facecam video sample carries. Browsers that cannot send
+/// WebRTC H.264 (Brave, Firefox without OpenH264) publish VP8, so the engine must
+/// handle both and tell the compositor which decoder to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FacecamVideoCodec {
+    H264,
+    Vp8,
+}
+
 /// A decoded-but-still-compressed media sample pulled from the facecam.
 pub enum FacecamSample {
-    /// One H.264 access unit in Annex-B (start-code prefixed) form.
-    Video(Bytes),
+    /// One video access unit: H.264 in Annex-B (start-code prefixed) form, or a
+    /// raw VP8 coded frame, tagged by `FacecamVideoCodec`.
+    Video(FacecamVideoCodec, Bytes),
     /// One Opus packet (raw payload, 48 kHz).
     Audio(Bytes),
 }
@@ -85,9 +95,18 @@ impl WhepSubscriber {
             let closed = closed_on_track.clone();
             Box::pin(async move {
                 let kind = track.kind();
+                // Inspect the negotiated codec so we depacketize/decode correctly:
+                // the publishing browser may send H.264 or VP8 for video.
+                let mime = track.codec().capability.mime_type.to_lowercase();
                 tokio::spawn(async move {
                     if kind == RTPCodecType::Video {
-                        pump_h264(track, tx, closed).await;
+                        if mime.contains("vp8") {
+                            pump_vp8(track, tx, closed).await;
+                        } else {
+                            // Default to H.264 for video/H264 (and anything else we
+                            // don't explicitly branch), matching prior behavior.
+                            pump_h264(track, tx, closed).await;
+                        }
                     } else if kind == RTPCodecType::Audio {
                         pump_opus(track, tx, closed).await;
                     }
@@ -162,11 +181,61 @@ async fn pump_h264(
         }
         match depacketizer.depacketize(&packet.payload) {
             Ok(au) if !au.is_empty() => {
-                if tx.send(FacecamSample::Video(au)).await.is_err() {
+                if tx
+                    .send(FacecamSample::Video(FacecamVideoCodec::H264, au))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Depacketize an inbound VP8 track into raw VP8 coded frames.
+async fn pump_vp8(
+    track: Arc<TrackRemote>,
+    tx: mpsc::Sender<FacecamSample>,
+    closed: Arc<AtomicBool>,
+) {
+    use webrtc::rtp::codecs::vp8::Vp8Packet;
+    use webrtc::rtp::packetizer::Depacketizer;
+
+    // The RTP VP8 depacketizer strips the per-packet VP8 payload descriptor but
+    // does NOT reassemble a frame that spans multiple RTP packets. libvpx needs a
+    // COMPLETE coded frame, so we accumulate depacketized payloads until the RTP
+    // marker bit (last packet of a frame), then emit the assembled frame.
+    let mut depacketizer = Vp8Packet::default();
+    let mut frame_buf: Vec<u8> = Vec::new();
+    while !closed.load(Ordering::SeqCst) {
+        let (packet, _) = match track.read_rtp().await {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        if packet.payload.is_empty() {
+            continue;
+        }
+        match depacketizer.depacketize(&packet.payload) {
+            Ok(part) => frame_buf.extend_from_slice(&part),
+            Err(_) => {
+                // Corrupt packet: drop the partial frame to avoid feeding libvpx a
+                // misassembled bitstream; the next keyframe recovers decoding.
+                frame_buf.clear();
+                continue;
+            }
+        }
+        // Marker bit set => last packet of this frame; emit the complete frame.
+        if packet.header.marker && !frame_buf.is_empty() {
+            let frame = Bytes::from(std::mem::take(&mut frame_buf));
+            if tx
+                .send(FacecamSample::Video(FacecamVideoCodec::Vp8, frame))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     }
 }

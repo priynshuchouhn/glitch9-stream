@@ -31,6 +31,16 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
 use windows::Win32::Foundation::RECT;
 
 use crate::facecam_decode::H264Decoder;
+use crate::facecam_vp8::Vp8Decoder;
+
+/// Which video codec the facecam WHEP track negotiated. Browsers that cannot send
+/// WebRTC H.264 (Brave, Firefox without OpenH264) publish VP8; the compositor
+/// decodes each with the matching decoder into the same NV12 texture contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FacecamCodec {
+    H264,
+    Vp8,
+}
 
 /// Fraction of the game width the facecam overlay occupies (bottom-right corner).
 const OVERLAY_WIDTH_FRACTION: f32 = 0.22;
@@ -46,7 +56,12 @@ pub struct FacecamCompositor {
     processor: ID3D11VideoProcessor,
     width: u32,
     height: u32,
-    decoder: H264Decoder,
+    /// The engine device, used to lazily build the matching decoder on first frame.
+    cam_device: ID3D11Device,
+    /// H.264 decoder (Media Foundation), built on first H.264 frame.
+    h264: Option<H264Decoder>,
+    /// VP8 decoder (libvpx), built on first VP8 frame.
+    vp8: Option<Vp8Decoder>,
     /// Latest decoded camera frame (NV12 texture), if any has arrived.
     cam_nv12: Option<ID3D11Texture2D>,
     cam_w: u32,
@@ -83,10 +98,8 @@ impl FacecamCompositor {
                 .CreateVideoProcessor(&enumerator, 0)
                 .map_err(|e| Error::capture(format!("VP create: {e}")))?;
 
-            let decoder = H264Decoder::new(&device)?;
-
             Ok(Self {
-                device,
+                device: device.clone(),
                 context,
                 video_device,
                 video_context,
@@ -94,7 +107,9 @@ impl FacecamCompositor {
                 processor,
                 width,
                 height,
-                decoder,
+                cam_device: device,
+                h264: None,
+                vp8: None,
                 cam_nv12: None,
                 cam_w: 0,
                 cam_h: 0,
@@ -102,10 +117,34 @@ impl FacecamCompositor {
         }
     }
 
-    /// Feed one camera H.264 access unit (Annex-B). Updates the latest decoded
-    /// NV12 camera texture when the decoder produces an output frame.
-    pub fn update_camera(&mut self, annex_b: &[u8]) -> Result<()> {
-        if let Some((tex, w, h)) = self.decoder.decode(annex_b)? {
+    /// Feed one camera access unit for the given codec, decoding with the matching
+    /// decoder (H.264 via Media Foundation, VP8 via libvpx). Updates the latest
+    /// decoded NV12 camera texture when the decoder produces an output frame.
+    ///
+    /// The decoder is built lazily on first use so a session only pays for the
+    /// codec its browser actually publishes.
+    pub fn update_camera(&mut self, codec: FacecamCodec, data: &[u8]) -> Result<()> {
+        let decoded = match codec {
+            FacecamCodec::H264 => {
+                if self.h264.is_none() {
+                    self.h264 = Some(H264Decoder::new(&self.cam_device)?);
+                }
+                self.h264
+                    .as_mut()
+                    .expect("h264 decoder present")
+                    .decode(data)?
+            }
+            FacecamCodec::Vp8 => {
+                if self.vp8.is_none() {
+                    self.vp8 = Some(Vp8Decoder::new(&self.cam_device)?);
+                }
+                self.vp8
+                    .as_mut()
+                    .expect("vp8 decoder present")
+                    .decode(data)?
+            }
+        };
+        if let Some((tex, w, h)) = decoded {
             self.cam_nv12 = Some(tex);
             self.cam_w = w;
             self.cam_h = h;

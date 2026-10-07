@@ -19,11 +19,13 @@ pub use stub::{Capturer, D3DContext};
 #[cfg(windows)]
 mod facecam_decode;
 #[cfg(windows)]
+mod facecam_vp8;
+#[cfg(windows)]
 mod facecam;
 #[cfg(windows)]
-pub use facecam::FacecamCompositor;
+pub use facecam::{FacecamCodec, FacecamCompositor};
 
 #[cfg(not(windows))]
 mod facecam_stub;
 #[cfg(not(windows))]
-pub use facecam_stub::FacecamCompositor;
+pub use facecam_stub::{FacecamCodec, FacecamCompositor};
