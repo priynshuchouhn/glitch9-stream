@@ -87,14 +87,22 @@ impl WhepSubscriber {
         let (tx, rx) = mpsc::channel::<FacecamSample>(256);
         let closed = Arc::new(AtomicBool::new(false));
 
+        // H.264 SPS/PPS (Annex-B) parsed from the answer SDP's sprop-parameter-sets.
+        // We subscribe mid-stream and only receive delta slices, so the decoder
+        // never sees parameter sets from the wire; we prepend these to the first
+        // access units so the decoder can initialize without waiting for an IDR.
+        let sps_pps: Arc<Mutex<Option<Bytes>>> = Arc::new(Mutex::new(None));
+
         // Pump each inbound track: depacketize H.264 (video) / forward Opus (audio).
         let tx_on_track = tx.clone();
         let closed_on_track = closed.clone();
         let pc_on_track = Arc::downgrade(&pc);
+        let sps_pps_on_track = sps_pps.clone();
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let tx = tx_on_track.clone();
             let closed = closed_on_track.clone();
             let pc_weak = pc_on_track.clone();
+            let sps_pps = sps_pps_on_track.clone();
             Box::pin(async move {
                 let kind = track.kind();
                 // Inspect the negotiated codec so we depacketize/decode correctly:
@@ -115,7 +123,7 @@ impl WhepSubscriber {
                         } else {
                             // Default to H.264 for video/H264 (and anything else we
                             // don't explicitly branch), matching prior behavior.
-                            pump_h264(track, tx, closed).await;
+                            pump_h264(track, tx, closed, sps_pps).await;
                         }
                     } else if kind == RTPCodecType::Audio {
                         pump_opus(track, tx, closed).await;
@@ -140,6 +148,18 @@ impl WhepSubscriber {
             .ok_or_else(|| anyhow::anyhow!("no local description"))?;
 
         let (answer_sdp, resource) = whep_post(whep_url, &local.sdp).await?;
+        // Extract H.264 SPS/PPS from the answer's sprop-parameter-sets so the pump
+        // can seed the decoder before any keyframe arrives from the wire.
+        if let Some(annex_b) = sps_pps_from_sdp(&answer_sdp) {
+            tracing::info!(
+                target: "g9::whep-sub",
+                "facecam h264 sprop-parameter-sets found ({} bytes Annex-B)",
+                annex_b.len()
+            );
+            *sps_pps.lock() = Some(annex_b);
+        } else {
+            tracing::info!(target: "g9::whep-sub", "facecam h264: no sprop-parameter-sets in answer SDP");
+        }
         let answer = RTCSessionDescription::answer(answer_sdp)
             .map_err(|e| anyhow::anyhow!("parse answer: {e}"))?;
         pc.set_remote_description(answer)
@@ -169,6 +189,97 @@ impl WhepSubscriber {
         }
         let _ = self.pc.close().await;
     }
+}
+
+/// Annex-B start code (4-byte) prefixed before each parameter-set / slice NAL.
+const ANNEX_B_START: [u8; 4] = [0, 0, 0, 1];
+
+/// True if an Annex-B access unit already contains an SPS (NAL type 7) or PPS
+/// (type 8), so we don't redundantly prepend parameter sets.
+fn au_has_param_sets(au: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 4 < au.len() {
+        if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
+            let t = au[i + 4] & 0x1f;
+            if t == 7 || t == 8 {
+                return true;
+            }
+            i += 4;
+        } else if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            let t = au[i + 3] & 0x1f;
+            if t == 7 || t == 8 {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Parse the H.264 `sprop-parameter-sets` (base64 SPS,PPS) from an SDP and return
+/// the parameter sets as Annex-B (each NAL prefixed with a 00 00 00 01 start code).
+/// Returns None when the SDP has no H.264 fmtp with sprop-parameter-sets.
+fn sps_pps_from_sdp(sdp: &str) -> Option<Bytes> {
+    // Find the fmtp line carrying sprop-parameter-sets=<b64-sps>,<b64-pps>.
+    let line = sdp
+        .lines()
+        .find(|l| l.contains("sprop-parameter-sets="))?;
+    let after = line.split("sprop-parameter-sets=").nth(1)?;
+    // The value runs until ';' (next fmtp param) or end of line.
+    let value = after.split([';', ' ']).next()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for b64 in value.split(',') {
+        if b64.is_empty() {
+            continue;
+        }
+        let nal = base64_decode(b64)?;
+        if nal.is_empty() {
+            continue;
+        }
+        out.extend_from_slice(&ANNEX_B_START);
+        out.extend_from_slice(&nal);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(Bytes::from(out))
+    }
+}
+
+/// Minimal standard-alphabet base64 decoder (SPS/PPS are tiny). Ignores padding
+/// and whitespace; returns None on an invalid character.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in input.as_bytes() {
+        if c == b'=' || c == b'\r' || c == b'\n' || c == b' ' {
+            continue;
+        }
+        let v = val(c)?;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Periodically send a Picture Loss Indication (PLI) to the publisher so it emits
@@ -205,15 +316,19 @@ fn spawn_keyframe_requester(
     });
 }
 
-/// Depacketize an inbound H.264 track into Annex-B access units.
+/// Depacketize an inbound H.264 track into Annex-B access units. `sps_pps` holds
+/// the Annex-B SPS/PPS parsed from the SDP; it is prepended to access units that
+/// don't already carry parameter sets, so the decoder can initialize mid-stream.
 async fn pump_h264(
     track: Arc<TrackRemote>,
     tx: mpsc::Sender<FacecamSample>,
     closed: Arc<AtomicBool>,
+    sps_pps: Arc<Mutex<Option<Bytes>>>,
 ) {
     use webrtc::rtp::codecs::h264::H264Packet;
     use webrtc::rtp::packetizer::Depacketizer;
 
+    let params = sps_pps.lock().clone();
     let mut depacketizer = H264Packet::default();
     let mut rtp_count: u64 = 0;
     let mut au_count: u64 = 0;
@@ -229,6 +344,17 @@ async fn pump_h264(
         match depacketizer.depacketize(&packet.payload) {
             Ok(au) if !au.is_empty() => {
                 au_count += 1;
+                // Prepend SPS/PPS when the AU lacks parameter sets, so the decoder
+                // gets a self-contained, decodable unit even mid-stream.
+                let au = match &params {
+                    Some(pp) if !au_has_param_sets(&au) => {
+                        let mut combined = Vec::with_capacity(pp.len() + au.len());
+                        combined.extend_from_slice(pp);
+                        combined.extend_from_slice(&au);
+                        Bytes::from(combined)
+                    }
+                    _ => au,
+                };
                 if au_count <= 5 {
                     tracing::info!(target: "g9::whep-sub", "facecam h264 pump: rtp={rtp_count} au#{au_count} ({} bytes)", au.len());
                 }
