@@ -40,6 +40,8 @@ pub struct H264Decoder {
     sw_h: u32,
     /// Scratch NV12 buffer reused across software-decoded frames.
     sw_nv12: Vec<u8>,
+    /// Count of decode() calls, used to log the first few attempts for diagnosis.
+    decode_calls: u32,
 }
 
 impl H264Decoder {
@@ -73,6 +75,7 @@ impl H264Decoder {
                 sw_w: 0,
                 sw_h: 0,
                 sw_nv12: Vec::new(),
+                decode_calls: 0,
             })
         }
     }
@@ -90,9 +93,29 @@ impl H264Decoder {
                 self.configured = true;
             }
             let sample = wrap_annex_b_sample(annex_b)?;
-            // Push input; ignore "need more input" style flow-control errors.
-            let _ = self.transform.ProcessInput(0, &sample, 0);
-            self.pull_output()
+            // Push input; ProcessInput can return "not accepting" if output must be
+            // drained first.
+            let in_res = self.transform.ProcessInput(0, &sample, 0);
+            let out = self.pull_output();
+            // Diagnostic: log the first several decode attempts so we can see the
+            // actual MFT input/output results when the facecam fails to appear.
+            self.decode_calls += 1;
+            if self.decode_calls <= 10 {
+                let in_code = in_res.as_ref().err().map(|e| e.code().0);
+                let out_desc = match &out {
+                    Ok(Some((_, w, h))) => format!("frame {w}x{h}"),
+                    Ok(None) => "no frame".to_string(),
+                    Err(e) => format!("err {e}"),
+                };
+                tracing::info!(
+                    "facecam h264 decode #{}: au={}B process_input_err={:?} -> {}",
+                    self.decode_calls,
+                    annex_b.len(),
+                    in_code,
+                    out_desc
+                );
+            }
+            out
         }
     }
 
@@ -123,11 +146,22 @@ impl H264Decoder {
                 }
                 Err(e) if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGED && attempt == 0 => {
                     // Re-negotiate the NV12 output type, then retry ProcessOutput.
+                    if self.decode_calls < 10 {
+                        tracing::info!("facecam h264: output stream changed; renegotiating NV12");
+                    }
                     configure_output_nv12(&self.transform)?;
                     continue;
                 }
                 // No frame ready, or an error we don't special-case — no frame now.
-                Err(_) => return Ok(None),
+                Err(e) => {
+                    if self.decode_calls < 10 {
+                        tracing::info!(
+                            "facecam h264 ProcessOutput err=0x{:08X}",
+                            e.code().0 as u32
+                        );
+                    }
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
