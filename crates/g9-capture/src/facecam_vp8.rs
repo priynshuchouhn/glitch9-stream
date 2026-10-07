@@ -24,8 +24,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
 };
 
-use env_libvpx_sys::{
-    vpx_codec_ctx_t, vpx_codec_decode, vpx_codec_dec_init_ver, vpx_codec_get_frame,
+// The package is `env-libvpx-sys` but its library crate is named `vpx_sys`.
+use vpx_sys::{
+    vpx_codec_ctx_t, vpx_codec_dec_init_ver, vpx_codec_decode, vpx_codec_get_frame,
     vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_image_t, vpx_img_fmt, VPX_DECODER_ABI_VERSION,
 };
 
@@ -240,7 +241,7 @@ impl Drop for Vp8Decoder {
     fn drop(&mut self) {
         if self.initialized {
             unsafe {
-                env_libvpx_sys::vpx_codec_destroy(&mut self.ctx);
+                vpx_sys::vpx_codec_destroy(&mut self.ctx);
             }
         }
     }
