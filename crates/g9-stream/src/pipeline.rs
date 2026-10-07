@@ -532,7 +532,10 @@ fn video_loop(
     // fails to initialize never breaks the game-only broadcast.
     let mut compositor: Option<FacecamCompositor> = match &facecam {
         Some(_) => match FacecamCompositor::new(&ctx, cfg.width, cfg.height) {
-            Ok(c) => Some(c),
+            Ok(c) => {
+                tracing::info!("facecam compositor ready; will composite camera over game");
+                Some(c)
+            }
             Err(e) => {
                 tracing::warn!("facecam compositor unavailable: {e}; broadcasting game only");
                 None
@@ -540,6 +543,8 @@ fn video_loop(
         },
         None => None,
     };
+    // Count facecam frames pulled by the video thread, for first-frames diagnostics.
+    let mut facecam_takes: u64 = 0;
 
     // Build encoder(s) per mode. Dual mode reuses the SAME converted NV12 texture.
     // All encoders share the capture D3D11 device so NVENC registers the NV12
@@ -628,12 +633,23 @@ fn video_loop(
         // corner of `frame`; on any error it leaves the game frame untouched.
         if let (Some(comp), Some(fc)) = (compositor.as_mut(), facecam.as_ref()) {
             if let Some((codec, au)) = fc.take_video() {
+                facecam_takes += 1;
+                if facecam_takes <= 5 {
+                    tracing::info!(
+                        "facecam video thread: took {codec:?} AU ({} bytes) #{facecam_takes}",
+                        au.len()
+                    );
+                }
                 if let Err(e) = comp.update_camera(codec, &au) {
-                    tracing::debug!("facecam decode skipped: {e}");
+                    if facecam_takes <= 10 {
+                        tracing::info!("facecam update_camera error: {e}");
+                    }
                 }
             }
             if let Err(e) = comp.composite_onto(&frame) {
-                tracing::debug!("facecam composite skipped: {e}");
+                if facecam_takes <= 10 {
+                    tracing::info!("facecam composite error: {e}");
+                }
             }
         }
 
