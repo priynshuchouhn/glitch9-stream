@@ -293,6 +293,31 @@ fn mix_into(base: &mut [f32], mic: &[f32]) {
     }
 }
 
+/// Resample interleaved stereo microphone PCM to the WASAPI device rate. Browser
+/// Opus always decodes at 48 kHz, while the VM loopback device commonly runs at
+/// 44.1 kHz; mixing the arrays without conversion causes drift and dropped voice.
+fn resample_stereo(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+    if in_rate == out_rate || input.len() < 4 {
+        return input.to_vec();
+    }
+    let input_frames = input.len() / 2;
+    let output_frames = ((input_frames as u64 * out_rate as u64) / in_rate as u64) as usize;
+    let step = in_rate as f64 / out_rate as f64;
+    let mut out = Vec::with_capacity(output_frames * 2);
+    for output_frame in 0..output_frames {
+        let pos = output_frame as f64 * step;
+        let left = (pos.floor() as usize).min(input_frames - 1);
+        let right = (left + 1).min(input_frames - 1);
+        let fraction = (pos - left as f64) as f32;
+        for channel in 0..2 {
+            let a = input[left * 2 + channel];
+            let b = input[right * 2 + channel];
+            out.push(a + (b - a) * fraction);
+        }
+    }
+    out
+}
+
 /// WASAPI capture-once → feed Opus + AAC → route to transports.
 fn audio_loop(
     audio_cfg: g9_core::config::AudioConfig,
@@ -358,6 +383,8 @@ fn audio_loop(
         Some(_) => OpusDecoder::new(48_000, 2).ok(),
         None => None,
     };
+    let mut mic_samples = std::collections::VecDeque::<f32>::new();
+    let mut mic_packets_received: u64 = 0;
 
     tracing::info!(
         "audio pipeline running (opus={}, aac={}, webrtc_audio={}, facecam_mic={})",
@@ -380,9 +407,17 @@ fn audio_loop(
                 if let (Some(dec), Some(fc)) = (mic_decoder.as_mut(), facecam.as_ref()) {
                     for packet in fc.drain_audio() {
                         if let Ok(mic_pcm) = dec.decode(&packet) {
-                            mix_into(&mut pcm.samples, &mic_pcm);
+                            mic_packets_received += 1;
+                            mic_samples.extend(resample_stereo(&mic_pcm, 48_000, actual_rate));
+                            if mic_packets_received == 1 {
+                                tracing::info!("facecam microphone: receiving and mixing Opus audio");
+                            }
                         }
                     }
+                    let mixed: Vec<f32> = (0..pcm.samples.len())
+                        .map(|_| mic_samples.pop_front().unwrap_or(0.0))
+                        .collect();
+                    mix_into(&mut pcm.samples, &mixed);
                 }
                 // Opus → WebRTC
                 if let (Some(enc), Some(t)) = (opus.as_mut(), webrtc_t.as_ref()) {

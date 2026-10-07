@@ -53,9 +53,7 @@ pub struct WhepSubscriber {
 impl WhepSubscriber {
     /// Connect to `whep_url` and start receiving. Samples are delivered on the
     /// returned channel; the channel closes when the subscription ends.
-    pub async fn connect(
-        whep_url: &str,
-    ) -> anyhow::Result<(Self, mpsc::Receiver<FacecamSample>)> {
+    pub async fn connect(whep_url: &str) -> anyhow::Result<(Self, mpsc::Receiver<FacecamSample>)> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()
             .map_err(|e| anyhow::anyhow!("register codecs: {e}"))?;
@@ -197,17 +195,21 @@ const ANNEX_B_START: [u8; 4] = [0, 0, 0, 1];
 /// True if an Annex-B access unit already contains an SPS (NAL type 7) or PPS
 /// (type 8), so we don't redundantly prepend parameter sets.
 fn au_has_param_sets(au: &[u8]) -> bool {
+    au_has_nal_type(au, 7) || au_has_nal_type(au, 8)
+}
+
+fn au_has_nal_type(au: &[u8], wanted: u8) -> bool {
     let mut i = 0;
     while i + 4 < au.len() {
         if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
             let t = au[i + 4] & 0x1f;
-            if t == 7 || t == 8 {
+            if t == wanted {
                 return true;
             }
             i += 4;
         } else if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
             let t = au[i + 3] & 0x1f;
-            if t == 7 || t == 8 {
+            if t == wanted {
                 return true;
             }
             i += 3;
@@ -223,9 +225,7 @@ fn au_has_param_sets(au: &[u8]) -> bool {
 /// Returns None when the SDP has no H.264 fmtp with sprop-parameter-sets.
 fn sps_pps_from_sdp(sdp: &str) -> Option<Bytes> {
     // Find the fmtp line carrying sprop-parameter-sets=<b64-sps>,<b64-pps>.
-    let line = sdp
-        .lines()
-        .find(|l| l.contains("sprop-parameter-sets="))?;
+    let line = sdp.lines().find(|l| l.contains("sprop-parameter-sets="))?;
     let after = line.split("sprop-parameter-sets=").nth(1)?;
     // The value runs until ';' (next fmtp param) or end of line.
     let value = after.split([';', ' ']).next()?.trim();
@@ -306,7 +306,9 @@ fn spawn_keyframe_requester(
                 media_ssrc: ssrc,
             };
             match pc.write_rtcp(&[Box::new(pli)]).await {
-                Ok(n) => tracing::info!(target: "g9::whep-sub", "facecam PLI sent (ssrc={ssrc}, {n} bytes)"),
+                Ok(n) => {
+                    tracing::info!(target: "g9::whep-sub", "facecam PLI sent (ssrc={ssrc}, {n} bytes)")
+                }
                 Err(e) => tracing::info!(target: "g9::whep-sub", "facecam PLI write failed: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -326,8 +328,12 @@ async fn pump_h264(
     use webrtc::rtp::codecs::h264::H264Packet;
     use webrtc::rtp::packetizer::Depacketizer;
 
-    let params = sps_pps.lock().clone();
     let mut depacketizer = H264Packet::default();
+    // H264Packet depacketizes one RTP payload, not a complete video frame. A
+    // browser frame commonly spans many FU-A packets; assemble all NAL parts up
+    // to the RTP marker bit before handing one access unit to Media Foundation.
+    let mut frame_buf: Vec<u8> = Vec::new();
+    let mut frame_timestamp: Option<u32> = None;
     let mut rtp_count: u64 = 0;
     let mut au_count: u64 = 0;
     while !closed.load(Ordering::SeqCst) {
@@ -338,20 +344,35 @@ async fn pump_h264(
         if packet.payload.is_empty() {
             continue;
         }
+        if frame_timestamp.is_some_and(|timestamp| timestamp != packet.header.timestamp) {
+            // The prior frame lost its marker/packet. Never feed a partial frame
+            // to the decoder; restart assembly at the new RTP timestamp.
+            frame_buf.clear();
+        }
+        frame_timestamp = Some(packet.header.timestamp);
         rtp_count += 1;
         match depacketizer.depacketize(&packet.payload) {
-            Ok(au) if !au.is_empty() => {
+            Ok(part) if !part.is_empty() => {
+                frame_buf.extend_from_slice(&part);
+                if !packet.header.marker {
+                    continue;
+                }
                 au_count += 1;
-                // Prepend SPS/PPS when the AU lacks parameter sets, so the decoder
-                // gets a self-contained, decodable unit even mid-stream.
-                let au = match &params {
-                    Some(pp) if !au_has_param_sets(&au) => {
-                        let mut combined = Vec::with_capacity(pp.len() + au.len());
-                        combined.extend_from_slice(pp);
-                        combined.extend_from_slice(&au);
+                let complete_au = std::mem::take(&mut frame_buf);
+                frame_timestamp = None;
+                // If SDP supplied parameter sets, prepend them to IDRs that do not
+                // already contain them. Do not prepend them to every delta frame.
+                let params = sps_pps.lock().clone();
+                let au = match params {
+                    Some(pp)
+                        if au_has_nal_type(&complete_au, 5) && !au_has_param_sets(&complete_au) =>
+                    {
+                        let mut combined = Vec::with_capacity(pp.len() + complete_au.len());
+                        combined.extend_from_slice(&pp);
+                        combined.extend_from_slice(&complete_au);
                         Bytes::from(combined)
                     }
-                    _ => au,
+                    _ => Bytes::from(complete_au),
                 };
                 if au_count <= 5 {
                     tracing::info!(target: "g9::whep-sub", "facecam h264 pump: rtp={rtp_count} au#{au_count} ({} bytes)", au.len());
@@ -373,6 +394,8 @@ async fn pump_h264(
                 }
             }
             Err(e) => {
+                frame_buf.clear();
+                frame_timestamp = None;
                 if rtp_count <= 300 && rtp_count % 100 == 0 {
                     tracing::info!(target: "g9::whep-sub", "facecam h264 pump: depacketize err after {rtp_count} rtp: {e}");
                 }
@@ -475,18 +498,19 @@ async fn whep_post(url: &str, sdp_offer: &str) -> anyhow::Result<(String, Option
         .ok_or_else(|| anyhow::anyhow!("malformed WHEP response"))?;
     let status_line = head.lines().next().unwrap_or("");
     if !(status_line.contains(" 201") || status_line.contains(" 200")) {
-        anyhow::bail!("WHEP server returned: {status_line} — body: {}", body.trim());
+        anyhow::bail!(
+            "WHEP server returned: {status_line} — body: {}",
+            body.trim()
+        );
     }
     // MediaMTX returns the WHEP SDP answer with Transfer-Encoding: chunked. The raw
     // body then starts with a hex chunk-size line (e.g. "8a1\r\n...") which is NOT
     // valid SDP and makes the parser fail with `SdpInvalidSyntax: <chunk-size>`.
     // De-chunk when the header advertises chunked encoding before parsing the SDP.
-    let is_chunked = head
-        .lines()
-        .any(|l| {
-            let l = l.to_ascii_lowercase();
-            l.starts_with("transfer-encoding:") && l.contains("chunked")
-        });
+    let is_chunked = head.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    });
     let sdp = if is_chunked {
         dechunk_body(body)
     } else {
@@ -495,7 +519,10 @@ async fn whep_post(url: &str, sdp_offer: &str) -> anyhow::Result<(String, Option
     // Resolve the resource URL from the Location header (relative or absolute).
     let location = head
         .lines()
-        .find_map(|l| l.strip_prefix("Location:").or_else(|| l.strip_prefix("location:")))
+        .find_map(|l| {
+            l.strip_prefix("Location:")
+                .or_else(|| l.strip_prefix("location:"))
+        })
         .map(|v| v.trim().to_string())
         .map(|loc| resolve_location(url, &loc));
     Ok((sdp, location))
@@ -514,7 +541,9 @@ fn dechunk_body(body: &str) -> String {
             Some(p) => i + p,
             None => break,
         };
-        let size_str = std::str::from_utf8(&bytes[i..line_end]).unwrap_or("").trim();
+        let size_str = std::str::from_utf8(&bytes[i..line_end])
+            .unwrap_or("")
+            .trim();
         // Chunk size may carry extensions after ';'; take the hex part only.
         let hex = size_str.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(hex, 16).unwrap_or(0);
