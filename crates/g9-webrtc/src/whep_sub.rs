@@ -90,15 +90,24 @@ impl WhepSubscriber {
         // Pump each inbound track: depacketize H.264 (video) / forward Opus (audio).
         let tx_on_track = tx.clone();
         let closed_on_track = closed.clone();
+        let pc_on_track = Arc::downgrade(&pc);
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let tx = tx_on_track.clone();
             let closed = closed_on_track.clone();
+            let pc_weak = pc_on_track.clone();
             Box::pin(async move {
                 let kind = track.kind();
                 // Inspect the negotiated codec so we depacketize/decode correctly:
                 // the publishing browser may send H.264 or VP8 for video.
                 let mime = track.codec().capability.mime_type.to_lowercase();
                 tracing::info!(target: "g9::whep-sub", "facecam track: kind={kind:?} codec={mime}");
+                if kind == RTPCodecType::Video {
+                    // Request a keyframe (PLI) so the publisher immediately sends an
+                    // IDR with SPS/PPS. We subscribe mid-stream, so without this the
+                    // decoder only ever sees delta slices (no parameter sets) and can
+                    // never initialize. Repeat until the pump sees a keyframe.
+                    spawn_keyframe_requester(pc_weak, track.ssrc(), closed.clone());
+                }
                 tokio::spawn(async move {
                     if kind == RTPCodecType::Video {
                         if mime.contains("vp8") {
@@ -160,6 +169,40 @@ impl WhepSubscriber {
         }
         let _ = self.pc.close().await;
     }
+}
+
+/// Periodically send a Picture Loss Indication (PLI) to the publisher so it emits
+/// a keyframe (IDR with SPS/PPS). Because the engine subscribes mid-stream, the
+/// first media it sees is delta slices with no parameter sets; the decoder cannot
+/// initialize until a keyframe arrives. We PLI on connect and repeat for a short
+/// window so a keyframe is produced promptly.
+fn spawn_keyframe_requester(
+    pc: std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
+    ssrc: u32,
+    closed: Arc<AtomicBool>,
+) {
+    use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    tokio::spawn(async move {
+        // ~1s cadence, bounded window; a keyframe normally arrives within a second
+        // or two. Keeps requesting in case early PLIs are lost.
+        for _ in 0..15 {
+            if closed.load(Ordering::SeqCst) {
+                break;
+            }
+            let Some(pc) = pc.upgrade() else { break };
+            let pli = PictureLossIndication {
+                sender_ssrc: 0,
+                media_ssrc: ssrc,
+            };
+            if let Err(e) = pc
+                .write_rtcp(&[Box::new(pli)])
+                .await
+            {
+                tracing::debug!(target: "g9::whep-sub", "facecam PLI write failed: {e}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+    });
 }
 
 /// Depacketize an inbound H.264 track into Annex-B access units.
