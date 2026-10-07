@@ -376,21 +376,34 @@ unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
     Ok(())
 }
 
-/// Re-set the decoder's NV12 output type. Called after the MFT reports a stream
-/// change (MF_E_TRANSFORM_STREAM_CHANGED) so it emits frames at the resolved size.
+/// Re-set the decoder's output type after a stream change
+/// (MF_E_TRANSFORM_STREAM_CHANGED). The decoder has now resolved the frame
+/// geometry, so we must select one of ITS enumerated output types (which carry the
+/// required frame-size/stride attributes) rather than a bare hand-built type — a
+/// hand-built type fails with MF_E_ATTRIBUTENOTFOUND. We pick the NV12 type.
 unsafe fn configure_output_nv12(transform: &IMFTransform) -> Result<()> {
-    use windows::Win32::Media::MediaFoundation::{
-        MFCreateMediaType, MFMediaType_Video, MFVideoFormat_NV12, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    };
-    let output_type =
-        MFCreateMediaType().map_err(|e| Error::capture(format!("MFCreateMediaType: {e}")))?;
-    output_type
-        .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-        .and_then(|_| output_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12))
-        .map_err(|e| Error::capture(format!("re-set NV12 output: {e}")))?;
-    transform
-        .SetOutputType(0, &output_type, 0)
-        .map_err(|e| Error::capture(format!("SetOutputType(renegotiate): {e}")))
+    use windows::Win32::Media::MediaFoundation::{MFVideoFormat_NV12, MF_MT_SUBTYPE};
+
+    let mut i = 0u32;
+    loop {
+        let media_type = match transform.GetOutputAvailableType(0, i) {
+            Ok(t) => t,
+            // No more available types; none was NV12.
+            Err(_) => {
+                return Err(Error::capture(
+                    "H.264 decoder exposes no NV12 output type after stream change",
+                ));
+            }
+        };
+        let subtype = media_type.GetGUID(&MF_MT_SUBTYPE).ok();
+        if subtype == Some(MFVideoFormat_NV12) {
+            transform
+                .SetOutputType(0, &media_type, 0)
+                .map_err(|e| Error::capture(format!("SetOutputType(NV12 enumerated): {e}")))?;
+            return Ok(());
+        }
+        i += 1;
+    }
 }
 
 /// Wrap an Annex-B access unit in an `IMFSample` with one memory buffer.
