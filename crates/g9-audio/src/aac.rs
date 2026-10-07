@@ -194,9 +194,9 @@ mod windows_mft {
         unsafe fn drain_output(&mut self, out: &mut Vec<Vec<u8>>) -> Result<()> {
             // The AAC encoder provides its own output samples when the stream info
             // flag is set; otherwise we allocate one sized to the stream info.
-            let mut info = MFT_OUTPUT_STREAM_INFO::default();
-            self.transform
-                .GetOutputStreamInfo(0, &mut info)
+            let info: MFT_OUTPUT_STREAM_INFO = self
+                .transform
+                .GetOutputStreamInfo(0)
                 .map_err(|e| Error::audio(format!("GetOutputStreamInfo: {e}")))?;
             let provides_samples = (info.dwFlags
                 & (windows::Win32::Media::MediaFoundation::MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0
