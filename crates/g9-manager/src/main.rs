@@ -14,16 +14,22 @@
 //! so each session's viewer URL is stable.
 
 mod cli;
-#[cfg(windows)]
-mod win;
+mod logging;
 #[cfg(not(windows))]
 mod stub;
+#[cfg(windows)]
+mod win;
 
 use clap::Parser;
 use cli::{Cli, Command};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let cfg = cli.to_config();
+
+    #[cfg(windows)]
+    logging::init(&cfg.log_dir)?;
+    #[cfg(not(windows))]
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -31,8 +37,6 @@ fn main() -> anyhow::Result<()> {
         )
         .with_target(false)
         .init();
-
-    let cfg = cli.to_config();
 
     #[cfg(windows)]
     {
