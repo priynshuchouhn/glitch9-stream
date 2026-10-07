@@ -161,7 +161,9 @@ impl H264Decoder {
 
     /// Attempt to pull one decoded output sample and extract its D3D11 NV12 texture.
     unsafe fn pull_output(&mut self) -> Result<Option<(ID3D11Texture2D, u32, u32)>> {
-        use windows::Win32::Media::MediaFoundation::MFT_OUTPUT_DATA_BUFFER;
+        use windows::Win32::Media::MediaFoundation::{
+            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+        };
 
         // A software H.264 MFT signals it has resolved the frame geometry by
         // returning MF_E_TRANSFORM_STREAM_CHANGED from the first ProcessOutput;
@@ -170,9 +172,22 @@ impl H264Decoder {
         for attempt in 0..2 {
             let mut status: u32 = 0;
             let mut out = [MFT_OUTPUT_DATA_BUFFER::default()];
-            let sample =
-                MFCreateSample().map_err(|e| Error::capture(format!("MFCreateSample: {e}")))?;
-            out[0].pSample = std::mem::ManuallyDrop::new(Some(sample));
+            let stream_info = self
+                .transform
+                .GetOutputStreamInfo(0)
+                .map_err(|e| Error::capture(format!("GetOutputStreamInfo: {e}")))?;
+            if stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
+                // Synchronous software decoders require the caller to provide a
+                // sample containing a buffer of at least cbSize bytes.
+                let sample =
+                    MFCreateSample().map_err(|e| Error::capture(format!("MFCreateSample: {e}")))?;
+                let buffer = MFCreateMemoryBuffer(stream_info.cbSize)
+                    .map_err(|e| Error::capture(format!("MFCreateMemoryBuffer(output): {e}")))?;
+                sample
+                    .AddBuffer(&buffer)
+                    .map_err(|e| Error::capture(format!("AddBuffer(output): {e}")))?;
+                out[0].pSample = std::mem::ManuallyDrop::new(Some(sample));
+            }
             let result = self.transform.ProcessOutput(0, &mut out, &mut status);
             let produced = std::mem::ManuallyDrop::take(&mut out[0].pSample);
 
