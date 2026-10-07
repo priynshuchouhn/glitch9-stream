@@ -22,6 +22,10 @@ use windows::Win32::Media::MediaFoundation::{
     MFCreateMemoryBuffer, MFCreateSample, MFStartup, MFSTARTUP_LITE, MF_VERSION,
 };
 
+/// MFT "the output format changed, re-negotiate it" HRESULT (0xC00D6D61). A
+/// software H.264 MFT returns this once it has resolved the real frame size.
+const MF_E_TRANSFORM_STREAM_CHANGED: i32 = 0xC00D_6D61u32 as i32;
+
 /// Decodes H.264 access units into NV12 D3D11 textures via a Media Foundation MFT.
 pub struct H264Decoder {
     device: ID3D11Device,
@@ -94,30 +98,39 @@ impl H264Decoder {
 
     /// Attempt to pull one decoded output sample and extract its D3D11 NV12 texture.
     unsafe fn pull_output(&mut self) -> Result<Option<(ID3D11Texture2D, u32, u32)>> {
-        use windows::Win32::Media::MediaFoundation::{
-            IMFMediaBuffer, MF_SOURCE_READERF_ERROR, MFT_OUTPUT_DATA_BUFFER,
-        };
-        let _ = &self.device;
-        let _ = MF_SOURCE_READERF_ERROR;
+        use windows::Win32::Media::MediaFoundation::MFT_OUTPUT_DATA_BUFFER;
 
-        let mut status: u32 = 0;
-        let mut out = [MFT_OUTPUT_DATA_BUFFER::default()];
-        // Allocate an output sample for the MFT to fill (software fallback path).
-        let sample = MFCreateSample().map_err(|e| Error::capture(format!("MFCreateSample: {e}")))?;
-        out[0].pSample = std::mem::ManuallyDrop::new(Some(sample));
-        match self.transform.ProcessOutput(0, &mut out, &mut status) {
-            Ok(()) => {}
-            // The decoder has no frame ready yet, or wants a media-type change —
-            // both are normal; return no frame this call.
-            Err(_) => return Ok(None),
+        // A software H.264 MFT signals it has resolved the frame geometry by
+        // returning MF_E_TRANSFORM_STREAM_CHANGED from the first ProcessOutput;
+        // the caller MUST re-set the output type (NV12) and retry, else the MFT
+        // never emits a frame. We allow one re-negotiation + retry per call.
+        for attempt in 0..2 {
+            let mut status: u32 = 0;
+            let mut out = [MFT_OUTPUT_DATA_BUFFER::default()];
+            let sample =
+                MFCreateSample().map_err(|e| Error::capture(format!("MFCreateSample: {e}")))?;
+            out[0].pSample = std::mem::ManuallyDrop::new(Some(sample));
+            let result = self.transform.ProcessOutput(0, &mut out, &mut status);
+            let produced = std::mem::ManuallyDrop::take(&mut out[0].pSample);
+
+            match result {
+                Ok(()) => {
+                    let sample = match produced {
+                        Some(s) => s,
+                        None => return Ok(None),
+                    };
+                    return self.sample_to_texture(&sample);
+                }
+                Err(e) if e.code().0 == MF_E_TRANSFORM_STREAM_CHANGED && attempt == 0 => {
+                    // Re-negotiate the NV12 output type, then retry ProcessOutput.
+                    configure_output_nv12(&self.transform)?;
+                    continue;
+                }
+                // No frame ready, or an error we don't special-case — no frame now.
+                Err(_) => return Ok(None),
+            }
         }
-
-        let produced = std::mem::ManuallyDrop::take(&mut out[0].pSample);
-        let sample = match produced {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-        self.sample_to_texture(&sample)
+        Ok(None)
     }
 
     /// Turn a decoded MF sample into an NV12 D3D11 texture. GPU (IMFDXGIBuffer)
@@ -265,11 +278,17 @@ unsafe fn create_h264_decoder_mft() -> Result<IMFTransform> {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
     };
+    // Prefer hardware, but include software decoders too — the datacenter VM has
+    // no HW H.264 decode, so a HARDWARE-only enum finds nothing. SORTANDFILTER
+    // orders hardware first when both exist.
+    let flags = MFT_ENUM_FLAG_HARDWARE.0
+        | MFT_ENUM_FLAG_SYNCMFT.0
+        | MFT_ENUM_FLAG_SORTANDFILTER.0;
     let mut activate = std::ptr::null_mut();
     let mut count: u32 = 0;
     MFTEnumEx(
         MFT_CATEGORY_VIDEO_DECODER,
-        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG(flags),
         Some(&input),
         Some(&output),
         &mut activate,
@@ -321,6 +340,23 @@ unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
         .SetOutputType(0, &output_type, 0)
         .map_err(|e| Error::capture(format!("SetOutputType: {e}")))?;
     Ok(())
+}
+
+/// Re-set the decoder's NV12 output type. Called after the MFT reports a stream
+/// change (MF_E_TRANSFORM_STREAM_CHANGED) so it emits frames at the resolved size.
+unsafe fn configure_output_nv12(transform: &IMFTransform) -> Result<()> {
+    use windows::Win32::Media::MediaFoundation::{
+        MFCreateMediaType, MFMediaType_Video, MFVideoFormat_NV12, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    };
+    let output_type =
+        MFCreateMediaType().map_err(|e| Error::capture(format!("MFCreateMediaType: {e}")))?;
+    output_type
+        .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+        .and_then(|_| output_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12))
+        .map_err(|e| Error::capture(format!("re-set NV12 output: {e}")))?;
+    transform
+        .SetOutputType(0, &output_type, 0)
+        .map_err(|e| Error::capture(format!("SetOutputType(renegotiate): {e}")))
 }
 
 /// Wrap an Annex-B access unit in an `IMFSample` with one memory buffer.
