@@ -183,21 +183,46 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let facecam_task = cfg.facecam_whep.clone().map(|whep_url| {
         let state = facecam.clone();
         tokio::spawn(async move {
-            match g9_webrtc::WhepSubscriber::connect(&whep_url).await {
-                Ok((sub, mut rx)) => {
-                    tracing::info!("facecam: subscribed to {}", whep_url);
-                    while let Some(sample) = rx.recv().await {
+            // The engine starts well before the player's browser opens the webcam
+            // tab, grants camera permission, and publishes to the SFU. So the first
+            // WHEP subscribe typically 404s ("no stream available"). Retry with
+            // bounded backoff until the publisher appears, and re-subscribe if the
+            // facecam later drops (player closes/reopens the cam), until shutdown.
+            const RETRY_MIN_MS: u64 = 1_000;
+            const RETRY_MAX_MS: u64 = 5_000;
+            let mut backoff_ms = RETRY_MIN_MS;
+            while !SHUTDOWN.load(Ordering::SeqCst) {
+                match g9_webrtc::WhepSubscriber::connect(&whep_url).await {
+                    Ok((sub, mut rx)) => {
+                        tracing::info!("facecam: subscribed to {}", whep_url);
+                        backoff_ms = RETRY_MIN_MS; // reset after a successful connect
+                        while let Some(sample) = rx.recv().await {
+                            if SHUTDOWN.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            match sample {
+                                g9_webrtc::FacecamSample::Video(au) => state.push_video(au),
+                                g9_webrtc::FacecamSample::Audio(pkt) => state.push_audio(pkt),
+                            }
+                        }
+                        sub.close().await;
+                        // Channel closed: the facecam stream ended. Loop to re-subscribe
+                        // in case the player brings their camera back.
                         if SHUTDOWN.load(Ordering::SeqCst) {
                             break;
                         }
-                        match sample {
-                            g9_webrtc::FacecamSample::Video(au) => state.push_video(au),
-                            g9_webrtc::FacecamSample::Audio(pkt) => state.push_audio(pkt),
-                        }
+                        tracing::info!("facecam: stream ended; will try to re-subscribe");
                     }
-                    sub.close().await;
+                    Err(e) => {
+                        // Expected while the browser hasn't published yet; stays at
+                        // debug-ish info so a slow cam start doesn't spam warnings.
+                        tracing::debug!(
+                            "facecam: subscribe not ready ({e:#}); retrying in {backoff_ms}ms"
+                        );
+                    }
                 }
-                Err(e) => tracing::warn!("facecam: subscribe failed: {e:#}"),
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(RETRY_MAX_MS);
             }
         })
     });
