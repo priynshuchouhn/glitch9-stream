@@ -18,8 +18,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::{
-    IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager,
-    MFCreateMemoryBuffer, MFCreateSample, MFStartup, MFSTARTUP_LITE, MF_VERSION,
+    IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMemoryBuffer,
+    MFCreateSample, MFStartup, MFSTARTUP_LITE, MF_VERSION,
 };
 
 /// MFT "the output format changed, re-negotiate it" HRESULT (0xC00D6D61). A
@@ -34,7 +34,8 @@ fn nal_types_preview(annex_b: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i + 4 < annex_b.len() {
         // Match 00 00 00 01 or 00 00 01 start codes.
-        let sc4 = annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 0 && annex_b[i + 3] == 1;
+        let sc4 =
+            annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 0 && annex_b[i + 3] == 1;
         let sc3 = annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 1;
         if sc4 {
             types.push(annex_b[i + 4] & 0x1f);
@@ -336,12 +337,12 @@ impl H264Decoder {
 
 /// Create the system H.264 decoder MFT via MFTEnumEx (hardware preferred).
 unsafe fn create_h264_decoder_mft() -> Result<IMFTransform> {
-    use windows::Win32::Media::MediaFoundation::{
-        MFTEnumEx, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_HARDWARE,
-        MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO,
-        MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
-    };
     use windows::core::GUID;
+    use windows::Win32::Media::MediaFoundation::{
+        MFMediaType_Video, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+        MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+        MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO,
+    };
 
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
@@ -354,9 +355,7 @@ unsafe fn create_h264_decoder_mft() -> Result<IMFTransform> {
     // Prefer hardware, but include software decoders too — the datacenter VM has
     // no HW H.264 decode, so a HARDWARE-only enum finds nothing. SORTANDFILTER
     // orders hardware first when both exist.
-    let flags = MFT_ENUM_FLAG_HARDWARE.0
-        | MFT_ENUM_FLAG_SYNCMFT.0
-        | MFT_ENUM_FLAG_SORTANDFILTER.0;
+    let flags = MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_SORTANDFILTER.0;
     let mut activate = std::ptr::null_mut();
     let mut count: u32 = 0;
     MFTEnumEx(
@@ -385,8 +384,8 @@ unsafe fn create_h264_decoder_mft() -> Result<IMFTransform> {
 /// Configure the decoder's input (H.264) and output (NV12) media types.
 unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
     use windows::Win32::Media::MediaFoundation::{
-        MFCreateMediaType, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFMediaType_Video, MFVideoFormat_H264,
-        MFVideoFormat_NV12,
+        MFCreateMediaType, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
+        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     };
 
     // Set ONLY the input (H.264) type. The decoder has no resolution yet, so it
@@ -405,10 +404,12 @@ unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
     transform
         .SetInputType(0, &input_type, 0)
         .map_err(|e| Error::capture(format!("SetInputType: {e}")))?;
-    // Also configure the output type eagerly from the decoder's enumerated types;
-    // if the decoder isn't ready yet this is a no-op path and the stream-change
-    // handler sets it later. (Silently ignore here; stream-change is the gate.)
+    // The decoder refuses ProcessOutput with MF_E_TRANSFORM_TYPE_NOT_SET until an
+    // output type is selected. Its enumerated NV12 type already carries the
+    // attributes required by this MFT; a later STREAM_CHANGED notification can
+    // still replace it after SPS resolution is known.
     let _ = MFVideoFormat_NV12;
+    configure_output_nv12(transform)?;
     Ok(())
 }
 
