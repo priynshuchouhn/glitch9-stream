@@ -184,16 +184,15 @@ impl Vp8Decoder {
         // Upload the packed NV12 into the default-usage texture. Row pitch is the
         // tightly packed width; the chroma plane follows the luma plane in memory,
         // which matches NV12's single-allocation layout for UpdateSubresource.
-        let context = {
-            let mut ctx = None;
-            self.device.GetImmediateContext(&mut ctx);
-            ctx.ok_or_else(|| Error::capture("no immediate context"))?
-        };
+        let context = self
+            .device
+            .GetImmediateContext()
+            .map_err(|e| Error::capture(format!("GetImmediateContext: {e}")))?;
         context.UpdateSubresource(
             &texture,
             0,
             None,
-            self.nv12.as_ptr() as *const _,
+            self.nv12.as_ptr() as *const core::ffi::c_void,
             w, // row pitch for the luma plane
             w * h, // depth pitch (start of chroma) — luma plane size
         );
