@@ -344,6 +344,3 @@ unsafe fn wrap_annex_b_sample(annex_b: &[u8]) -> Result<IMFSample> {
         .map_err(|e| Error::capture(format!("AddBuffer: {e}")))?;
     Ok(sample)
 }
-
-/// Extract the D3D11 NV12 texture from a decoded sample's DXGI buffer.
-
