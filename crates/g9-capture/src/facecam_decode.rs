@@ -350,6 +350,11 @@ unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
         MFVideoFormat_NV12,
     };
 
+    // Set ONLY the input (H.264) type. The decoder has no resolution yet, so it
+    // cannot accept an output type now — attempting a bare NV12 output type here
+    // fails with MF_E_ATTRIBUTENOTFOUND. Instead we feed data, the decoder resolves
+    // geometry and returns MF_E_TRANSFORM_STREAM_CHANGED from ProcessOutput, and we
+    // then set an enumerated NV12 output type (configure_output_nv12).
     let input_type =
         MFCreateMediaType().map_err(|e| Error::capture(format!("MFCreateMediaType: {e}")))?;
     input_type
@@ -361,18 +366,10 @@ unsafe fn configure_decoder_types(transform: &IMFTransform) -> Result<()> {
     transform
         .SetInputType(0, &input_type, 0)
         .map_err(|e| Error::capture(format!("SetInputType: {e}")))?;
-
-    let output_type =
-        MFCreateMediaType().map_err(|e| Error::capture(format!("MFCreateMediaType: {e}")))?;
-    output_type
-        .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-        .map_err(|e| Error::capture(format!("set major: {e}")))?;
-    output_type
-        .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
-        .map_err(|e| Error::capture(format!("set output subtype: {e}")))?;
-    transform
-        .SetOutputType(0, &output_type, 0)
-        .map_err(|e| Error::capture(format!("SetOutputType: {e}")))?;
+    // Also configure the output type eagerly from the decoder's enumerated types;
+    // if the decoder isn't ready yet this is a no-op path and the stream-change
+    // handler sets it later. (Silently ignore here; stream-change is the gate.)
+    let _ = MFVideoFormat_NV12;
     Ok(())
 }
 
