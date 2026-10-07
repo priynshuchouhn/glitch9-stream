@@ -305,11 +305,9 @@ fn spawn_keyframe_requester(
                 sender_ssrc: 0,
                 media_ssrc: ssrc,
             };
-            if let Err(e) = pc
-                .write_rtcp(&[Box::new(pli)])
-                .await
-            {
-                tracing::debug!(target: "g9::whep-sub", "facecam PLI write failed: {e}");
+            match pc.write_rtcp(&[Box::new(pli)]).await {
+                Ok(n) => tracing::info!(target: "g9::whep-sub", "facecam PLI sent (ssrc={ssrc}, {n} bytes)"),
+                Err(e) => tracing::info!(target: "g9::whep-sub", "facecam PLI write failed: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
