@@ -5,6 +5,8 @@ mod packetizer;
 pub mod signaling;
 mod transport;
 mod whip;
+mod whep_sub;
 
 pub use transport::WebRtcTransport;
 pub use whip::WhipTransport;
+pub use whep_sub::{FacecamSample, WhepSubscriber};

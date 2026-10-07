@@ -80,6 +80,12 @@ pub struct Cli {
     #[arg(long)]
     pub ready_file: Option<String>,
 
+    /// WHEP URL of the player's browser-published facecam (camera + microphone).
+    /// When set, the engine subscribes to it, composites the camera over the game
+    /// video, and mixes the microphone into the broadcast audio.
+    #[arg(long)]
+    pub facecam_whep: Option<String>,
+
     /// Metrics snapshot interval (seconds).
     #[arg(long, default_value_t = 5)]
     pub stats_interval: u64,
@@ -97,6 +103,8 @@ pub struct RunConfig {
     pub rtmp: Option<RtmpConfig>,
     pub signaling: SignalingConfig,
     pub ready_file: Option<String>,
+    /// WHEP URL for the player's facecam (camera + mic), when broadcasting with a cam.
+    pub facecam_whep: Option<String>,
     pub stats_interval_secs: u64,
 }
 
@@ -187,6 +195,7 @@ impl Cli {
                 }),
             },
             ready_file: self.ready_file.clone(),
+            facecam_whep: self.facecam_whep.as_ref().filter(|u| !u.trim().is_empty()).cloned(),
             stats_interval_secs: self.stats_interval,
         })
     }

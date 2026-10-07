@@ -132,6 +132,15 @@ pub struct BroadcastConfig {
     pub session_id: String,
     pub sfu_whip_base: Option<String>, // e.g. http://46.232.234.68:8889
     pub whip_token: Option<String>,
+    /// YouTube RTMP ingest URL for the user's channel (optional). Present only
+    /// while this session is broadcasting to YouTube (per-VM exclusive).
+    pub rtmp_url: Option<String>,
+    /// YouTube stream key (secret). Passed to the engine via the G9_STREAM_KEY
+    /// env var, never on the command line / logs.
+    pub stream_key: Option<String>,
+    /// WHEP URL of the player's browser-published facecam (cam + mic), which the
+    /// engine subscribes to and composites over the game before encode (optional).
+    pub cam_whep_url: Option<String>,
 }
 
 impl BroadcastConfig {
@@ -144,6 +153,11 @@ impl BroadcastConfig {
         self.sfu_whip_base
             .as_ref()
             .map(|b| format!("{}/{}/whip", b.trim_end_matches('/'), self.room()))
+    }
+    /// True when this session should also publish to YouTube via RTMP.
+    pub fn youtube_enabled(&self) -> bool {
+        self.rtmp_url.as_ref().is_some_and(|u| !u.is_empty())
+            && self.stream_key.as_ref().is_some_and(|k| !k.is_empty())
     }
 }
 
@@ -158,6 +172,9 @@ pub fn read_broadcast_config(cfg: &Config, user: &str) -> BroadcastConfig {
     bc.session_id = json_str(&text, "sessionId").unwrap_or_default();
     bc.sfu_whip_base = json_str(&text, "sfuWhipBase").filter(|s| !s.is_empty());
     bc.whip_token = json_str(&text, "whipToken").filter(|s| !s.is_empty());
+    bc.rtmp_url = json_str(&text, "rtmpUrl").filter(|s| !s.is_empty());
+    bc.stream_key = json_str(&text, "streamKey").filter(|s| !s.is_empty());
+    bc.cam_whep_url = json_str(&text, "camWhepUrl").filter(|s| !s.is_empty());
     bc
 }
 
@@ -284,12 +301,28 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     let ready_file = broadcast_ready_path(cfg, &session.user);
     let _ = std::fs::remove_file(&ready_file);
     let ready_file = ready_file.to_string_lossy();
+    // YouTube egress (optional, per-VM exclusive). When broadcast.json carries an
+    // RTMP URL + key, the engine runs BOTH outputs: WHIP (SFU spectate) + RTMP
+    // (the user's YouTube). The stream key is passed via env, never on the cmdline.
+    let youtube = bc.youtube_enabled();
+    let output_flag = if youtube { "webrtc,youtube" } else { "webrtc" };
+    let rtmp_flag = match (youtube, bc.rtmp_url.as_ref()) {
+        (true, Some(url)) => format!(" --output {output_flag} --rtmp-url {url}"),
+        _ => String::new(),
+    };
+    // Facecam: when the player is publishing a browser cam+mic, the engine
+    // subscribes to it (WHEP) and composites it over the game before encode.
+    let facecam_flag = match bc.cam_whep_url.as_ref() {
+        Some(url) if youtube => format!(" --facecam-whep {url}"),
+        _ => String::new(),
+    };
     let cmdline = match bc.whip_url() {
         Some(whip_url) => format!(
             "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
-             --fps {fps} --bitrate {br} --audio true --ready-file \"{ready}\"",
+             --fps {fps} --bitrate {br} --audio true --ready-file \"{ready}\"{rtmp}{cam}",
             engine = cfg.engine, whip = whip_url, w = cfg.width, h = cfg.height,
             fps = cfg.fps, br = cfg.bitrate, ready = ready_file,
+            rtmp = rtmp_flag, cam = facecam_flag,
         ),
         None => format!(
             "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
@@ -318,6 +351,13 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         // Pass the WHIP publish token via env (kept off the command line / logs).
         if let Some(tok) = bc.whip_token.as_ref() {
             env_vec = add_env_var(env_vec, "G9_WHIP_TOKEN", tok);
+        }
+        // Pass the YouTube stream key via env too — it's a secret, so it must never
+        // appear on the command line (the engine reads G9_STREAM_KEY).
+        if youtube {
+            if let Some(key) = bc.stream_key.as_ref() {
+                env_vec = add_env_var(env_vec, "G9_STREAM_KEY", key);
+            }
         }
 
         // Inheritable log file handle for stdout+stderr.

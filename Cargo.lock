@@ -913,6 +913,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "clap",
  "g9-audio",
  "g9-capture",

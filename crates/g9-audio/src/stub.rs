@@ -49,3 +49,20 @@ impl OpusEncoder {
         Err(Error::Unsupported("Opus encode available on the Windows target".into()))
     }
 }
+
+/// Opus decoder stub for non-Windows type-checking. The real libopus-backed
+/// decoder in `opus_dec.rs` is compiled on the Windows target.
+pub struct OpusDecoder;
+
+impl OpusDecoder {
+    pub fn new(_sample_rate: u32, _channels: u8) -> Result<Self> {
+        Err(Error::Unsupported(
+            "Opus decoder is compiled on the Windows target".into(),
+        ))
+    }
+    pub fn decode(&mut self, _packet: &[u8]) -> Result<Vec<f32>> {
+        Err(Error::Unsupported(
+            "Opus decode available on the Windows target".into(),
+        ))
+    }
+}

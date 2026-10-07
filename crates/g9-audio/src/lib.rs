@@ -9,6 +9,10 @@ mod opus_enc;
 #[cfg(windows)]
 pub use opus_enc::OpusEncoder;
 #[cfg(windows)]
+mod opus_dec;
+#[cfg(windows)]
+pub use opus_dec::OpusDecoder;
+#[cfg(windows)]
 mod wasapi;
 #[cfg(windows)]
 pub use wasapi::WasapiCapture;
@@ -20,7 +24,7 @@ pub use aac::AacEncoder;
 #[cfg(not(windows))]
 mod stub;
 #[cfg(not(windows))]
-pub use stub::{AacEncoder, OpusEncoder, WasapiCapture};
+pub use stub::{AacEncoder, OpusDecoder, OpusEncoder, WasapiCapture};
 
 /// A chunk of interleaved f32 PCM captured from WASAPI.
 #[derive(Debug, Clone)]

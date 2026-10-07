@@ -34,6 +34,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         cfg.audio.enabled
     );
 
+    // Shared facecam state (populated by the WHEP subscriber task below when a
+    // facecam URL is configured; consumed by the video/audio worker threads).
+    let facecam = crate::facecam::FacecamState::new();
+
     // --- Build encoder profiles for the requested outputs ---
     let webrtc_profile = cfg.outputs.webrtc.then(|| {
         EncoderProfile::webrtc(cfg.video.width, cfg.video.height, cfg.video.fps, cfg.video.bitrate_bps)
@@ -121,6 +125,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         metrics.clone(),
         force_keyframe.clone(),
         abr_target,
+        // The video thread composites the facecam over the game when present.
+        cfg.facecam_whep.as_ref().map(|_| facecam.clone()),
     );
 
     // --- Spawn the audio thread (WASAPI → Opus/AAC → transports), if enabled ---
@@ -129,6 +135,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             cfg.audio.clone(),
             cfg.outputs.clone(),
             transports.clone(),
+            // The audio thread mixes the facecam mic into the broadcast when present.
+            cfg.facecam_whep.as_ref().map(|_| facecam.clone()),
         )
     } else {
         tracing::info!("audio disabled (--audio false); video-only");
@@ -168,9 +176,38 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         }
     });
 
+    // --- Facecam (optional): subscribe to the player's browser-published camera +
+    //     mic via WHEP. The camera is composited over the game (video thread) and
+    //     the mic is mixed into the broadcast audio (audio thread). When no facecam
+    //     URL is configured this is skipped and the broadcast is game-only.
+    let facecam_task = cfg.facecam_whep.clone().map(|whep_url| {
+        let state = facecam.clone();
+        tokio::spawn(async move {
+            match g9_webrtc::WhepSubscriber::connect(&whep_url).await {
+                Ok((sub, mut rx)) => {
+                    tracing::info!("facecam: subscribed to {}", whep_url);
+                    while let Some(sample) = rx.recv().await {
+                        if SHUTDOWN.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match sample {
+                            g9_webrtc::FacecamSample::Video(au) => state.push_video(au),
+                            g9_webrtc::FacecamSample::Audio(pkt) => state.push_audio(pkt),
+                        }
+                    }
+                    sub.close().await;
+                }
+                Err(e) => tracing::warn!("facecam: subscribe failed: {e:#}"),
+            }
+        })
+    });
+
     // --- Wait for Ctrl-C, then shut down cleanly ---
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown requested");
+    if let Some(h) = facecam_task {
+        h.abort();
+    }
     clear_ready_file(cfg.ready_file.as_deref());
     for t in &transports {
         t.stop().await;
@@ -193,15 +230,27 @@ fn spawn_audio_thread(
     audio_cfg: g9_core::config::AudioConfig,
     outputs: g9_core::config::Outputs,
     transports: Vec<Arc<dyn MediaTransport>>,
+    facecam: Option<crate::facecam::FacecamState>,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("g9-audio".into())
         .spawn(move || {
-            if let Err(e) = audio_loop(audio_cfg, outputs, transports) {
+            if let Err(e) = audio_loop(audio_cfg, outputs, transports, facecam) {
                 tracing::warn!("audio pipeline stopped: {e}");
             }
         })
         .ok()
+}
+
+/// Sum `mic` interleaved f32 PCM into `base` in place, clamping to [-1, 1]. Mixes
+/// as many samples as overlap (the mic packet may be shorter/longer than the
+/// current loopback chunk); any excess mic samples are dropped for this chunk.
+/// Both are assumed 48 kHz stereo (the broadcast audio format), so no resampling.
+fn mix_into(base: &mut [f32], mic: &[f32]) {
+    let n = base.len().min(mic.len());
+    for i in 0..n {
+        base[i] = (base[i] + mic[i]).clamp(-1.0, 1.0);
+    }
 }
 
 /// WASAPI capture-once → feed Opus + AAC → route to transports.
@@ -209,8 +258,9 @@ fn audio_loop(
     audio_cfg: g9_core::config::AudioConfig,
     outputs: g9_core::config::Outputs,
     transports: Vec<Arc<dyn MediaTransport>>,
+    facecam: Option<crate::facecam::FacecamState>,
 ) -> g9_core::Result<()> {
-    use g9_audio::{AacEncoder, OpusEncoder, WasapiCapture};
+    use g9_audio::{AacEncoder, OpusDecoder, OpusEncoder, WasapiCapture};
 
     let mut capture = WasapiCapture::new(audio_cfg.sample_rate, audio_cfg.channels)?;
 
@@ -261,11 +311,20 @@ fn audio_loop(
         .cloned();
     let youtube_t = transports.iter().find(|t| t.name() == "youtube").cloned();
 
+    // Facecam mic: decode the player's Opus voice (published from the browser,
+    // always 48 kHz / 2 ch per the WHIP sender) so it can be mixed into the system
+    // audio before re-encode. Only when a facecam is present.
+    let mut mic_decoder = match facecam.as_ref() {
+        Some(_) => OpusDecoder::new(48_000, 2).ok(),
+        None => None,
+    };
+
     tracing::info!(
-        "audio pipeline running (opus={}, aac={}, webrtc_audio={})",
+        "audio pipeline running (opus={}, aac={}, webrtc_audio={}, facecam_mic={})",
         opus.is_some(),
         aac.is_some(),
         webrtc_t.is_some(),
+        mic_decoder.is_some(),
     );
 
     loop {
@@ -273,7 +332,18 @@ fn audio_loop(
             break;
         }
         match capture.read()? {
-            Some(pcm) => {
+            Some(mut pcm) => {
+                // Mix the player's microphone (facecam) into the system/game audio.
+                // Decode queued Opus voice packets to PCM and sum into `pcm` with a
+                // simple clamp. Both are interleaved f32; mic is 48 kHz/2ch, which
+                // matches the broadcast path (loopback is typically 48 kHz too).
+                if let (Some(dec), Some(fc)) = (mic_decoder.as_mut(), facecam.as_ref()) {
+                    for packet in fc.drain_audio() {
+                        if let Ok(mic_pcm) = dec.decode(&packet) {
+                            mix_into(&mut pcm.samples, &mic_pcm);
+                        }
+                    }
+                }
                 // Opus → WebRTC
                 if let (Some(enc), Some(t)) = (opus.as_mut(), webrtc_t.as_ref()) {
                     for pkt in enc.encode(&pcm)? {
@@ -385,11 +455,14 @@ fn spawn_video_thread(
     metrics: Metrics,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
     abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
+    facecam: Option<crate::facecam::FacecamState>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("g9-video".into())
         .spawn(move || {
-            if let Err(e) = video_loop(cfg, mode, transports, metrics, force_keyframe, abr_target) {
+            if let Err(e) = video_loop(
+                cfg, mode, transports, metrics, force_keyframe, abr_target, facecam,
+            ) {
                 tracing::error!("video pipeline stopped: {e}");
             }
         })
@@ -406,8 +479,9 @@ fn video_loop(
     metrics: Metrics,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
     abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
+    facecam: Option<crate::facecam::FacecamState>,
 ) -> g9_core::Result<()> {
-    use g9_capture::{Capturer, D3DContext};
+    use g9_capture::{Capturer, D3DContext, FacecamCompositor};
     use g9_convert::Nv12Converter;
     use g9_core::time::PtsClock;
     use g9_encode::NvencEncoder;
@@ -416,6 +490,20 @@ fn video_loop(
     let mut capturer = Capturer::new(&ctx, cfg.display_index)?;
     let mut converter = Nv12Converter::new_with_ctx(&ctx, cfg.width, cfg.height)?;
     let clock = PtsClock::start_now();
+
+    // Facecam compositor (optional): decodes the camera H.264 and blends it over
+    // the game texture before NV12 conversion. Built lazily so a facecam that
+    // fails to initialize never breaks the game-only broadcast.
+    let mut compositor: Option<FacecamCompositor> = match &facecam {
+        Some(_) => match FacecamCompositor::new(&ctx, cfg.width, cfg.height) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("facecam compositor unavailable: {e}; broadcasting game only");
+                None
+            }
+        },
+        None => None,
+    };
 
     // Build encoder(s) per mode. Dual mode reuses the SAME converted NV12 texture.
     // All encoders share the capture D3D11 device so NVENC registers the NV12
@@ -496,6 +584,20 @@ fn video_loop(
                     "capture geometry OK: {}x{} matches encode size",
                     frame.width, frame.height
                 );
+            }
+        }
+
+        // 1b) Composite the facecam over the game texture (GPU) when present. The
+        // compositor pulls the newest decoded camera frame and blends it into a
+        // corner of `frame`; on any error it leaves the game frame untouched.
+        if let (Some(comp), Some(fc)) = (compositor.as_mut(), facecam.as_ref()) {
+            if let Some(au) = fc.take_video() {
+                if let Err(e) = comp.update_camera(&au) {
+                    tracing::debug!("facecam decode skipped: {e}");
+                }
+            }
+            if let Err(e) = comp.composite_onto(&frame) {
+                tracing::debug!("facecam composite skipped: {e}");
             }
         }
 

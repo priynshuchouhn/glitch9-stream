@@ -5,6 +5,7 @@
 //!   WASAPI → PCM → {Opus→WebRTC, AAC→RTMPS}
 
 mod cli;
+mod facecam;
 mod pipeline;
 
 use clap::Parser;
