@@ -2,10 +2,9 @@
 //! player's browser-published camera + mic) and the synchronous video/audio worker
 //! threads that composite the camera over the game and mix the mic into the audio.
 //!
-//! The subscriber task pushes the latest H.264 access unit and queues Opus audio
-//! packets here; the video thread pulls the newest camera frame to composite, and
-//! the audio thread drains queued mic packets to mix. Lock-light and lossy by
-//! design: a cam frame or two dropped under load never stalls the game pipeline.
+//! The subscriber task queues H.264 access units and Opus audio packets here; the
+//! video thread decodes camera access units in order and composites the newest
+//! decoded frame, while the audio thread drains queued mic packets to mix.
 
 use bytes::Bytes;
 use g9_capture::FacecamCodec;
@@ -17,6 +16,11 @@ use std::sync::Arc;
 /// limit; old packets are dropped (audio favors freshness over completeness).
 const MAX_AUDIO_QUEUE: usize = 64;
 
+/// H.264 is inter-frame compressed, so the decoder must see the initial IDR before
+/// any dependent delta frames. Keep a bounded ordered queue instead of a single
+/// "latest" slot: a short arrival burst must not overwrite the startup keyframe.
+const MAX_VIDEO_QUEUE: usize = 120;
+
 /// Thread-safe handle shared between the subscriber task and the worker threads.
 #[derive(Clone)]
 pub struct FacecamState {
@@ -24,10 +28,8 @@ pub struct FacecamState {
 }
 
 struct Inner {
-    /// Most recent camera video frame + its codec (H.264 Annex-B or VP8), if any.
-    /// Replaced each time a newer one arrives — the compositor only needs the
-    /// latest frame — and tagged so the compositor selects the right decoder.
-    latest_video: Mutex<Option<(FacecamCodec, Bytes)>>,
+    /// Encoded camera access units waiting to be decoded, in arrival order.
+    video_queue: Mutex<VecDeque<(FacecamCodec, Bytes)>>,
     /// Queued Opus mic packets awaiting mix into the broadcast audio.
     audio_queue: Mutex<VecDeque<Bytes>>,
 }
@@ -36,20 +38,26 @@ impl FacecamState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
-                latest_video: Mutex::new(None),
+                video_queue: Mutex::new(VecDeque::new()),
                 audio_queue: Mutex::new(VecDeque::new()),
             }),
         }
     }
 
-    /// Store the newest camera frame + codec (replacing any un-consumed one).
+    /// Queue a camera access unit without allowing an unconsumed startup keyframe
+    /// to be overwritten by the delta frames that immediately follow it.
     pub fn push_video(&self, codec: FacecamCodec, au: Bytes) {
-        *self.inner.latest_video.lock() = Some((codec, au));
+        let mut q = self.inner.video_queue.lock();
+        if q.len() >= MAX_VIDEO_QUEUE {
+            q.pop_front();
+        }
+        q.push_back((codec, au));
     }
 
-    /// Take the latest camera frame + codec, if a new one arrived since last call.
+    /// Take the oldest queued camera access unit so inter-frame decode order is
+    /// preserved.
     pub fn take_video(&self) -> Option<(FacecamCodec, Bytes)> {
-        self.inner.latest_video.lock().take()
+        self.inner.video_queue.lock().pop_front()
     }
 
     /// Queue a mic Opus packet, dropping the oldest when the bound is reached.
@@ -71,5 +79,21 @@ impl FacecamState {
 impl Default for FacecamState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_access_units_are_consumed_in_arrival_order() {
+        let state = FacecamState::new();
+        state.push_video(FacecamCodec::H264, Bytes::from_static(b"keyframe"));
+        state.push_video(FacecamCodec::H264, Bytes::from_static(b"delta"));
+
+        assert_eq!(state.take_video().unwrap().1, Bytes::from_static(b"keyframe"));
+        assert_eq!(state.take_video().unwrap().1, Bytes::from_static(b"delta"));
+        assert!(state.take_video().is_none());
     }
 }
