@@ -9,6 +9,7 @@ use crate::cli::RunConfig;
 use anyhow::Result;
 use g9_core::metrics::{Metrics, PipelineCounters};
 use g9_core::profile::EncoderProfile;
+use g9_core::time::PtsClock;
 use g9_core::transport::MediaTransport;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -132,6 +133,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     }
 
     let metrics = Metrics::new();
+    // One monotonic media timeline for both worker threads. Previously video
+    // created its clock after D3D initialization while AAC started counting at
+    // zero independently, which made YouTube schedule game audio before video.
+    let media_clock = PtsClock::start_now();
 
     // --- Spawn the video capture/encode thread (real work happens on Windows+NVIDIA) ---
     let video_handle = spawn_video_thread(
@@ -145,6 +150,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         cfg.facecam_whep.as_ref().map(|_| facecam.clone()),
         cfg.facecam_position.clone(),
         cfg.facecam_shape.clone(),
+        media_clock.clone(),
     );
 
     // --- Spawn the audio thread (WASAPI → Opus/AAC → transports), if enabled ---
@@ -155,6 +161,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             transports.clone(),
             // The audio thread mixes the facecam mic into the broadcast when present.
             cfg.facecam_whep.as_ref().map(|_| facecam.clone()),
+            media_clock,
         )
     } else {
         tracing::info!("audio disabled (--audio false); video-only");
@@ -291,11 +298,12 @@ fn spawn_audio_thread(
     outputs: g9_core::config::Outputs,
     transports: Vec<Arc<dyn MediaTransport>>,
     facecam: Option<crate::facecam::FacecamState>,
+    clock: PtsClock,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("g9-audio".into())
         .spawn(move || {
-            if let Err(e) = audio_loop(audio_cfg, outputs, transports, facecam) {
+            if let Err(e) = audio_loop(audio_cfg, outputs, transports, facecam, clock) {
                 tracing::warn!("audio pipeline stopped: {e}");
             }
         })
@@ -344,6 +352,7 @@ fn audio_loop(
     outputs: g9_core::config::Outputs,
     transports: Vec<Arc<dyn MediaTransport>>,
     facecam: Option<crate::facecam::FacecamState>,
+    clock: PtsClock,
 ) -> g9_core::Result<()> {
     use g9_audio::{AacEncoder, OpusDecoder, OpusEncoder, WasapiCapture};
 
@@ -423,6 +432,9 @@ fn audio_loop(
         }
         match capture.read()? {
             Some(mut pcm) => {
+                // Put captured audio on the same stream timeline as video. AAC
+                // preserves this origin and advances it by encoded sample count.
+                pcm.pts = clock.now();
                 // Mix the player's microphone (facecam) into the system/game audio.
                 // Decode queued Opus voice packets to PCM and sum into `pcm` with a
                 // simple clamp. Both are interleaved f32; mic is 48 kHz/2ch, which
@@ -584,6 +596,7 @@ fn spawn_video_thread(
     facecam: Option<crate::facecam::FacecamState>,
     facecam_position: String,
     facecam_shape: String,
+    clock: PtsClock,
 ) -> Option<std::thread::JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("g9-video".into())
@@ -598,6 +611,7 @@ fn spawn_video_thread(
                 facecam,
                 facecam_position,
                 facecam_shape,
+                clock,
             ) {
                 tracing::error!("video pipeline stopped: {e}");
             }
@@ -618,17 +632,15 @@ fn video_loop(
     facecam: Option<crate::facecam::FacecamState>,
     facecam_position: String,
     facecam_shape: String,
+    clock: PtsClock,
 ) -> g9_core::Result<()> {
     use g9_capture::{Capturer, D3DContext, FacecamCompositor, GpuFrameCache};
     use g9_convert::Nv12Converter;
-    use g9_core::time::PtsClock;
     use g9_encode::NvencEncoder;
 
     let ctx = D3DContext::new(None)?; // prefers NVIDIA adapter
     let mut capturer = Capturer::new(&ctx, cfg.display_index)?;
     let mut converter = Nv12Converter::new_with_ctx(&ctx, cfg.width, cfg.height)?;
-    let clock = PtsClock::start_now();
-
     // Facecam compositor (optional): decodes the camera H.264 and blends it over
     // the game texture before NV12 conversion. Built lazily so a facecam that
     // fails to initialize never breaks the game-only broadcast.

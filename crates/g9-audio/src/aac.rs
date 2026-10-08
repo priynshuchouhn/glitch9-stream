@@ -21,6 +21,8 @@ pub struct AacEncoder {
     bitrate_bps: u32,
     emitted_config: bool,
     samples_emitted: u64,
+    /// Shared stream-clock timestamp of the first captured PCM chunk.
+    timeline_origin: Option<Duration>,
     // On Windows this also owns the IMFTransform + buffers (set up in `new`).
     #[cfg(windows)]
     mft: windows_mft::MfAacMft,
@@ -36,6 +38,7 @@ impl AacEncoder {
             bitrate_bps,
             emitted_config: false,
             samples_emitted: 0,
+            timeline_origin: None,
             #[cfg(windows)]
             mft,
         })
@@ -45,6 +48,7 @@ impl AacEncoder {
     /// (`is_config = true`); subsequent packets are raw AAC frames.
     pub fn encode(&mut self, pcm: &PcmChunk) -> Result<Vec<AudioPacket>> {
         let mut out = Vec::new();
+        let timeline_origin = *self.timeline_origin.get_or_insert(pcm.pts);
 
         if !self.emitted_config {
             let asc = audio_specific_config(AAC_LC, self.sample_rate, self.channels);
@@ -61,9 +65,10 @@ impl AacEncoder {
         #[cfg(windows)]
         {
             for aac in self.mft.encode(&pcm.samples)? {
-                let pts = Duration::from_nanos(
-                    self.samples_emitted * 1_000_000_000 / self.sample_rate as u64,
-                );
+                let pts = timeline_origin
+                    + Duration::from_nanos(
+                        self.samples_emitted * 1_000_000_000 / self.sample_rate as u64,
+                    );
                 // Each AAC-LC frame is 1024 samples per channel.
                 self.samples_emitted += 1024;
                 out.push(AudioPacket {
