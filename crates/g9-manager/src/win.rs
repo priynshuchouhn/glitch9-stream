@@ -349,13 +349,12 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     let ready_file = broadcast_ready_path(cfg, &session.user);
     let _ = std::fs::remove_file(&ready_file);
     let ready_file = ready_file.to_string_lossy();
-    // YouTube egress (optional, per-VM exclusive). When broadcast.json carries an
-    // RTMP URL + key, the engine runs BOTH outputs: WHIP (SFU spectate) + RTMP
-    // (the user's YouTube). The stream key is passed via env, never on the cmdline.
+    // YouTube egress (optional, per-VM exclusive). A YouTube-live slot publishes
+    // only RTMP; it must not also consume an SFU/browser broadcast slot. The stream
+    // key is passed via env, never on the command line.
     let youtube = bc.youtube_enabled();
-    let output_flag = if youtube { "webrtc,youtube" } else { "webrtc" };
     let rtmp_flag = match (youtube, bc.rtmp_url.as_ref()) {
-        (true, Some(url)) => format!(" --output {output_flag} --rtmp-url {url}"),
+        (true, Some(url)) => format!(" --output youtube --rtmp-url {url}"),
         _ => String::new(),
     };
     // Facecam: when the player is publishing a browser cam+mic, the engine
@@ -368,7 +367,19 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         ),
         _ => String::new(),
     };
-    let cmdline =
+    let cmdline = if youtube {
+        format!(
+            "\"{engine}\" --display 0 --width {w} --height {h} --fps {fps} \
+             --bitrate {br} --audio true{rtmp}{cam}",
+            engine = cfg.engine,
+            w = cfg.width,
+            h = cfg.height,
+            fps = cfg.fps,
+            br = cfg.bitrate,
+            rtmp = rtmp_flag,
+            cam = facecam_flag,
+        )
+    } else {
         match bc.whip_url() {
             Some(whip_url) => format!(
                 "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
@@ -391,7 +402,8 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
             fps = cfg.fps, br = cfg.bitrate,
         )
             }
-        };
+        }
+    };
 
     unsafe {
         // Session user token → process runs in that session/desktop.
@@ -624,10 +636,10 @@ struct WorkerState {
     /// process liveness (they open no local port) and to stop them precisely.
     pid: u32,
 
-    /// True when this worker publishes to the SFU via WHIP. WHIP workers run no
-    /// local signaling server / `/healthz`, so they are health-checked by process
-    /// liveness rather than by a listening port.
-    whip: bool,
+    /// True when this worker pushes to a remote output (WHIP or YouTube). Remote
+    /// publishers run no local signaling server / `/healthz`, so they are checked
+    /// by process liveness rather than by a listening port.
+    remote_output: bool,
 
     /// The broadcast session id this worker was launched for (from broadcast.json).
     /// Workers are keyed by Windows session id, which is stable across game sessions
@@ -695,8 +707,8 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
             // The config also carries the game-session id, which changes when a new
             // game session reuses this gamer slot — a signal to retarget the engine.
             let bc = read_broadcast_config(cfg, &s.user);
-            let whip = bc.whip_url().is_some();
             let youtube = bc.youtube_enabled();
+            let remote_output = youtube || bc.whip_url().is_some();
             let session_id = bc.session_id.clone();
 
             match workers.get_mut(&s.id) {
@@ -712,8 +724,8 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     let youtube_changed = youtube != st.youtube;
                     let healthy = if session_changed || youtube_changed {
                         false
-                    } else if st.whip {
-                        // WHIP: alive = the engine process is still running. A crashed
+                    } else if st.remote_output {
+                        // Remote output: alive = the engine process is still running. A crashed
                         // publisher's PID disappears, which triggers a restart below.
                         process_alive(st.pid)
                     } else {
@@ -739,10 +751,10 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                         } else {
                             st.unhealthy_polls += 1;
                             tracing::warn!(
-                                "worker session {} (pid {}, whip={}) unhealthy ({}/{})",
+                                "worker session {} (pid {}, remote_output={}) unhealthy ({}/{})",
                                 s.id,
                                 st.pid,
-                                st.whip,
+                                st.remote_output,
                                 st.unhealthy_polls,
                                 UNHEALTHY_RESTART_THRESHOLD
                             );
@@ -756,7 +768,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                         );
                         // Stop the old worker precisely (by PID for WHIP, by port for
                         // direct) before relaunching, so we never stack engines.
-                        if st.whip {
+                        if st.remote_output {
                             stop_pid(st.pid);
                         } else {
                             stop_port(port);
@@ -770,7 +782,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                                 );
                                 *st = WorkerState {
                                     pid,
-                                    whip,
+                                    remote_output,
                                     youtube,
                                     session_id: session_id.clone(),
                                     ..Default::default()
@@ -795,14 +807,14 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     match launch_in_session(s, cfg) {
                         Ok(pid) => {
                             tracing::info!(
-                                "session active -> broadcast {} (session {}) [pid {}] whip={} room={}",
-                                s.user, s.id, pid, whip, session_id
+                                "session active -> broadcast {} (session {}) [pid {}] remote_output={} room={}",
+                                s.user, s.id, pid, remote_output, session_id
                             );
                             workers.insert(
                                 s.id,
                                 WorkerState {
                                     pid,
-                                    whip,
+                                    remote_output,
                                     youtube,
                                     session_id: session_id.clone(),
                                     ..Default::default()
@@ -829,7 +841,7 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                     st.pid
                 );
                 // Stop by PID for WHIP workers (no port); by port for direct ones.
-                if st.whip {
+                if st.remote_output {
                     stop_pid(st.pid);
                 } else {
                     stop_port(cfg.base_port.saturating_add(id as u16));
