@@ -17,11 +17,11 @@ pub use stub::{Capturer, D3DContext, GpuFrameCache};
 // Facecam compositor: decodes the player's camera H.264 and blends it over the
 // game texture before NV12 conversion. Windows-only real impl; a stub elsewhere.
 #[cfg(windows)]
+mod facecam;
+#[cfg(windows)]
 mod facecam_decode;
 #[cfg(windows)]
 mod facecam_vp8;
-#[cfg(windows)]
-mod facecam;
 #[cfg(windows)]
 pub use facecam::{FacecamCodec, FacecamCompositor};
 

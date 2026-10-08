@@ -15,11 +15,15 @@ impl D3DContext {
     }
 
     pub fn enumerate_adapters() -> Result<Vec<AdapterInfo>> {
-        Err(Error::Unsupported("DXGI is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "DXGI is only available on Windows".into(),
+        ))
     }
 
     pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
-        Err(Error::Unsupported("DXGI is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "DXGI is only available on Windows".into(),
+        ))
     }
 }
 
@@ -33,11 +37,15 @@ impl Capturer {
     }
 
     pub fn acquire_frame(&mut self, _timeout_ms: u32) -> Result<Option<GpuTextureFrame>> {
-        Err(Error::Unsupported("capture is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "capture is only available on Windows".into(),
+        ))
     }
 
     pub fn dump_one_frame(&mut self, _ctx: &D3DContext, _path: &str) -> Result<(u32, u32)> {
-        Err(Error::Unsupported("capture is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "capture is only available on Windows".into(),
+        ))
     }
 }
 

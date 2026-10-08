@@ -102,9 +102,8 @@ impl OpusEncoder {
                 .encode_float(&frame, &mut scratch)
                 .map_err(|e| Error::audio(format!("opus encode: {e}")))?;
             let per_channel = self.frame_samples / self.channels as usize;
-            let pts = Duration::from_nanos(
-                self.samples_emitted * 1_000_000_000 / self.out_rate as u64,
-            );
+            let pts =
+                Duration::from_nanos(self.samples_emitted * 1_000_000_000 / self.out_rate as u64);
             self.samples_emitted += per_channel as u64;
             out.push(AudioPacket {
                 data: bytes::Bytes::copy_from_slice(&scratch[..n]),

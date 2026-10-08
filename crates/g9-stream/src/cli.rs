@@ -2,9 +2,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use g9_core::config::{
-    AudioConfig, Outputs, RtmpConfig, Secret, SignalingConfig, VideoConfig,
-};
+use g9_core::config::{AudioConfig, Outputs, RtmpConfig, Secret, SignalingConfig, VideoConfig};
 
 /// Glitch9 lightweight streaming engine (DXGI → D3D11 → NVENC → WebRTC/RTMPS).
 #[derive(Parser, Debug)]
@@ -86,6 +84,18 @@ pub struct Cli {
     #[arg(long)]
     pub facecam_whep: Option<String>,
 
+    /// Corner used for the facecam overlay in the composed broadcast.
+    #[arg(
+        long,
+        default_value = "bottom-right",
+        value_parser = ["top-left", "top-right", "bottom-left", "bottom-right"]
+    )]
+    pub facecam_position: String,
+
+    /// Aspect shape used for the facecam overlay.
+    #[arg(long, default_value = "landscape", value_parser = ["landscape", "square", "portrait"])]
+    pub facecam_shape: String,
+
     /// Metrics snapshot interval (seconds).
     #[arg(long, default_value_t = 5)]
     pub stats_interval: u64,
@@ -105,6 +115,8 @@ pub struct RunConfig {
     pub ready_file: Option<String>,
     /// WHEP URL for the player's facecam (camera + mic), when broadcasting with a cam.
     pub facecam_whep: Option<String>,
+    pub facecam_position: String,
+    pub facecam_shape: String,
     pub stats_interval_secs: u64,
 }
 
@@ -186,16 +198,29 @@ impl Cli {
             signaling: SignalingConfig {
                 bind_addr: self.bind,
                 port: self.port,
-                whip: self.publish_whip.as_ref().filter(|u| !u.trim().is_empty()).map(|url| {
-                    let token = std::env::var("G9_WHIP_TOKEN")
-                        .ok()
-                        .or_else(|| self.whip_token.clone())
-                        .unwrap_or_default();
-                    g9_core::config::WhipConfig { url: url.clone(), token }
-                }),
+                whip: self
+                    .publish_whip
+                    .as_ref()
+                    .filter(|u| !u.trim().is_empty())
+                    .map(|url| {
+                        let token = std::env::var("G9_WHIP_TOKEN")
+                            .ok()
+                            .or_else(|| self.whip_token.clone())
+                            .unwrap_or_default();
+                        g9_core::config::WhipConfig {
+                            url: url.clone(),
+                            token,
+                        }
+                    }),
             },
             ready_file: self.ready_file.clone(),
-            facecam_whep: self.facecam_whep.as_ref().filter(|u| !u.trim().is_empty()).cloned(),
+            facecam_whep: self
+                .facecam_whep
+                .as_ref()
+                .filter(|u| !u.trim().is_empty())
+                .cloned(),
+            facecam_position: self.facecam_position.clone(),
+            facecam_shape: self.facecam_shape.clone(),
             stats_interval_secs: self.stats_interval,
         })
     }

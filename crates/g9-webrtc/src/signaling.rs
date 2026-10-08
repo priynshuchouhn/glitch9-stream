@@ -59,11 +59,7 @@ async fn serve_viewer_page(mut stream: tokio::net::TcpStream) -> std::io::Result
     let _ = stream.shutdown().await;
     let mut drain = [0u8; 1024];
     loop {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut drain),
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut drain)).await
         {
             Ok(Ok(0)) | Err(_) => break, // client closed, or timed out
             Ok(Ok(_)) => continue,
@@ -81,8 +77,12 @@ use webrtc::track::track_local::TrackLocal;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SignalMessage {
-    Offer { sdp: String },
-    Answer { sdp: String },
+    Offer {
+        sdp: String,
+    },
+    Answer {
+        sdp: String,
+    },
     Candidate {
         candidate: String,
         #[serde(rename = "sdpMid")]
@@ -116,7 +116,8 @@ impl SignalingServer {
     pub async fn run(self) -> anyhow::Result<()> {
         let addr = format!("{}:{}", self.bind_addr, self.port);
         let listener = TcpListener::bind(&addr).await?;
-        self.state.store(2 /*Connected=listening*/, Ordering::Relaxed);
+        self.state
+            .store(2 /*Connected=listening*/, Ordering::Relaxed);
         let srv = Arc::new(self);
 
         loop {
@@ -208,7 +209,11 @@ impl SignalingServer {
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     ) -> anyhow::Result<()> {
         tracing::info!(target: "g9::webrtc", "viewer connected (WS up); creating PeerConnection");
-        let pc = Arc::new(self.api.new_peer_connection(self.rtc_config.clone()).await?);
+        let pc = Arc::new(
+            self.api
+                .new_peer_connection(self.rtc_config.clone())
+                .await?,
+        );
 
         // Add the shared tracks (view-only: we only send).
         let video_sender = pc.add_track(self.video_track.clone()).await?;

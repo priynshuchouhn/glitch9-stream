@@ -24,18 +24,42 @@ const NV_ENC_SUCCESS: i32 = 0;
 //   CREATE_BITSTREAM_BUFFER=1, REGISTER_RESOURCE=5, MAP_INPUT_RESOURCE=4,
 //   PIC_PARAMS=7|hi, LOCK_BITSTREAM=2|hi, FUNCTION_LIST=2.   (hi = 1<<31)
 const HI: u32 = 1 << 31;
-fn ver_func_list() -> u32 { struct_version(2) }
-fn ver_open() -> u32 { struct_version(1) }
-fn ver_preset_cfg() -> u32 { struct_version(5) | HI }
-fn ver_config() -> u32 { struct_version(9) | HI }
-fn ver_rc() -> u32 { struct_version(1) }
-fn ver_init() -> u32 { struct_version(7) | HI }
-fn ver_bitstream_buf() -> u32 { struct_version(1) }
-fn ver_register() -> u32 { struct_version(5) }
-fn ver_map() -> u32 { struct_version(4) }
-fn ver_pic() -> u32 { struct_version(7) | HI }
-fn ver_lock() -> u32 { struct_version(2) | HI }
-fn ver_reconfigure() -> u32 { struct_version(2) | HI }
+fn ver_func_list() -> u32 {
+    struct_version(2)
+}
+fn ver_open() -> u32 {
+    struct_version(1)
+}
+fn ver_preset_cfg() -> u32 {
+    struct_version(5) | HI
+}
+fn ver_config() -> u32 {
+    struct_version(9) | HI
+}
+fn ver_rc() -> u32 {
+    struct_version(1)
+}
+fn ver_init() -> u32 {
+    struct_version(7) | HI
+}
+fn ver_bitstream_buf() -> u32 {
+    struct_version(1)
+}
+fn ver_register() -> u32 {
+    struct_version(5)
+}
+fn ver_map() -> u32 {
+    struct_version(4)
+}
+fn ver_pic() -> u32 {
+    struct_version(7) | HI
+}
+fn ver_lock() -> u32 {
+    struct_version(2) | HI
+}
+fn ver_reconfigure() -> u32 {
+    struct_version(2) | HI
+}
 
 pub struct NvencEncoder {
     _dll: HMODULE,
@@ -64,15 +88,18 @@ impl NvencEncoder {
         Err(Error::encode("use NvencEncoder::new_with_ctx on Windows"))
     }
 
-    pub fn new_with_ctx(ctx: &D3DContext, profile: EncoderProfile, clock: PtsClock) -> Result<Self> {
+    pub fn new_with_ctx(
+        ctx: &D3DContext,
+        profile: EncoderProfile,
+        clock: PtsClock,
+    ) -> Result<Self> {
         unsafe {
             // 1) Load the driver's NVENC entry point.
             let dll = LoadLibraryA(PCSTR(b"nvEncodeAPI64.dll\0".as_ptr()))
                 .map_err(|e| Error::encode(format!("LoadLibrary nvEncodeAPI64.dll: {e}")))?;
             let proc = GetProcAddress(dll, PCSTR(b"NvEncodeAPICreateInstance\0".as_ptr()))
                 .ok_or_else(|| Error::encode("NvEncodeAPICreateInstance not found"))?;
-            type CreateInstanceFn =
-                unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> i32;
+            type CreateInstanceFn = unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> i32;
             let create: CreateInstanceFn = std::mem::transmute(proc);
 
             // 2) Function list.
@@ -297,8 +324,10 @@ impl NvencEncoder {
             map.registeredResource = reg.registeredResource;
             let st = (self.api.nvEncMapInputResource.unwrap())(self.encoder, &mut map);
             if st != NV_ENC_SUCCESS {
-                let _ =
-                    (self.api.nvEncUnregisterResource.unwrap())(self.encoder, reg.registeredResource);
+                let _ = (self.api.nvEncUnregisterResource.unwrap())(
+                    self.encoder,
+                    reg.registeredResource,
+                );
                 return Err(Error::encode(format!(
                     "MapInputResource: {} ({st})",
                     status_name(st)
@@ -389,12 +418,20 @@ impl NvencEncoder {
 
             Ok(Some(EncodedFrame {
                 codec: VideoCodec::H264,
-                kind: if is_key { FrameKind::Key } else { FrameKind::Delta },
+                kind: if is_key {
+                    FrameKind::Key
+                } else {
+                    FrameKind::Delta
+                },
                 data: annexb,
                 annex_b: true,
                 pts,
                 dts: pts,
-                parameter_sets: if is_key { self.cached_params.clone() } else { None },
+                parameter_sets: if is_key {
+                    self.cached_params.clone()
+                } else {
+                    None
+                },
             }))
         }
     }

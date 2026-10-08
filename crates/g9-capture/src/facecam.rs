@@ -43,7 +43,7 @@ pub enum FacecamCodec {
     Vp8,
 }
 
-/// Fraction of the game width the facecam overlay occupies (bottom-right corner).
+/// Fraction of the game width the facecam overlay occupies.
 const OVERLAY_WIDTH_FRACTION: f32 = 0.22;
 /// Margin from the edges, as a fraction of the game width.
 const OVERLAY_MARGIN_FRACTION: f32 = 0.02;
@@ -69,11 +69,55 @@ pub struct FacecamCompositor {
     /// Reusable BGRA render target containing game + facecam. Desktop duplication
     /// textures are input-only and must never be used as a VP output surface.
     composite_texture: ID3D11Texture2D,
+    position: FacecamPosition,
+    shape: FacecamShape,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FacecamPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl FacecamPosition {
+    fn parse(value: &str) -> Self {
+        match value {
+            "top-left" => Self::TopLeft,
+            "top-right" => Self::TopRight,
+            "bottom-left" => Self::BottomLeft,
+            _ => Self::BottomRight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FacecamShape {
+    Landscape,
+    Square,
+    Portrait,
+}
+
+impl FacecamShape {
+    fn parse(value: &str) -> Self {
+        match value {
+            "square" => Self::Square,
+            "portrait" => Self::Portrait,
+            _ => Self::Landscape,
+        }
+    }
 }
 
 impl FacecamCompositor {
     /// Build a compositor targeting a `width`x`height` game frame on `ctx`'s device.
-    pub fn new(ctx: &D3DContext, width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        ctx: &D3DContext,
+        width: u32,
+        height: u32,
+        position: &str,
+        shape: &str,
+    ) -> Result<Self> {
         unsafe {
             let device = ctx.device().clone();
             let context = ctx.context().clone();
@@ -144,6 +188,8 @@ impl FacecamCompositor {
                 cam_w: 0,
                 cam_h: 0,
                 composite_texture,
+                position: FacecamPosition::parse(position),
+                shape: FacecamShape::parse(shape),
             })
         }
     }
@@ -246,17 +292,45 @@ impl FacecamCompositor {
                 .map_err(|e| Error::capture(format!("VP input view: {e}")))?;
             let input_view = input_view.ok_or_else(|| Error::capture("null VP input view"))?;
 
-            // Destination rectangle: bottom-right corner overlay, preserving 16:9.
+            // Destination rectangle in the configured corner and aspect shape.
             let margin = (self.width as f32 * OVERLAY_MARGIN_FRACTION) as i32;
-            let ow = (self.width as f32 * OVERLAY_WIDTH_FRACTION) as i32;
-            let oh = (ow as f32 * 9.0 / 16.0) as i32;
-            let right = self.width as i32 - margin;
-            let bottom = self.height as i32 - margin;
+            let (width_fraction, aspect) = match self.shape {
+                FacecamShape::Landscape => (OVERLAY_WIDTH_FRACTION, 16.0 / 9.0),
+                FacecamShape::Square => (0.18, 1.0),
+                FacecamShape::Portrait => (0.13, 9.0 / 16.0),
+            };
+            let ow = (self.width as f32 * width_fraction) as i32;
+            let oh = (ow as f32 / aspect) as i32;
+            let (left, top) = match self.position {
+                FacecamPosition::TopLeft => (margin, margin),
+                FacecamPosition::TopRight => (self.width as i32 - margin - ow, margin),
+                FacecamPosition::BottomLeft => (margin, self.height as i32 - margin - oh),
+                FacecamPosition::BottomRight => (
+                    self.width as i32 - margin - ow,
+                    self.height as i32 - margin - oh,
+                ),
+            };
             let dest = RECT {
-                left: right - ow,
-                top: bottom - oh,
-                right,
-                bottom,
+                left,
+                top,
+                right: left + ow,
+                bottom: top + oh,
+            };
+
+            // Center-crop the source so square/portrait modes do not stretch faces.
+            let cam_aspect = self.cam_w as f32 / self.cam_h.max(1) as f32;
+            let (source_w, source_h) = if cam_aspect > aspect {
+                ((self.cam_h as f32 * aspect) as i32, self.cam_h as i32)
+            } else {
+                (self.cam_w as i32, (self.cam_w as f32 / aspect) as i32)
+            };
+            let source_left = (self.cam_w as i32 - source_w) / 2;
+            let source_top = (self.cam_h as i32 - source_h) / 2;
+            let source = RECT {
+                left: source_left,
+                top: source_top,
+                right: source_left + source_w,
+                bottom: source_top + source_h,
             };
 
             let full = RECT {
@@ -276,6 +350,12 @@ impl FacecamCompositor {
                 1,
                 true,
                 Some(&dest),
+            );
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                1,
+                true,
+                Some(&source),
             );
             self.video_context
                 .VideoProcessorSetStreamAlpha(&self.processor, 1, true, 1.0);

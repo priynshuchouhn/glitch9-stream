@@ -3,7 +3,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "glitch9-manager", version, about = "Per-session broadcast manager for glitch9-stream")]
+#[command(
+    name = "glitch9-manager",
+    version,
+    about = "Per-session broadcast manager for glitch9-stream"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -22,7 +26,11 @@ pub struct Cli {
     pub public_ip: Option<String>,
 
     /// Path to the engine binary.
-    #[arg(long, default_value = r"C:\glitch9-stream\target\release\glitch9-stream.exe", global = true)]
+    #[arg(
+        long,
+        default_value = r"C:\glitch9-stream\target\release\glitch9-stream.exe",
+        global = true
+    )]
     pub engine: String,
 
     #[arg(long, default_value_t = 1920, global = true)]

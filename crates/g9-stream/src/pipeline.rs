@@ -143,6 +143,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         abr_target,
         // The video thread composites the facecam over the game when present.
         cfg.facecam_whep.as_ref().map(|_| facecam.clone()),
+        cfg.facecam_position.clone(),
+        cfg.facecam_shape.clone(),
     );
 
     // --- Spawn the audio thread (WASAPI → Opus/AAC → transports), if enabled ---
@@ -580,6 +582,8 @@ fn spawn_video_thread(
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
     abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
     facecam: Option<crate::facecam::FacecamState>,
+    facecam_position: String,
+    facecam_shape: String,
 ) -> Option<std::thread::JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("g9-video".into())
@@ -592,6 +596,8 @@ fn spawn_video_thread(
                 force_keyframe,
                 abr_target,
                 facecam,
+                facecam_position,
+                facecam_shape,
             ) {
                 tracing::error!("video pipeline stopped: {e}");
             }
@@ -610,6 +616,8 @@ fn video_loop(
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
     abr_target: Option<Arc<std::sync::atomic::AtomicU32>>,
     facecam: Option<crate::facecam::FacecamState>,
+    facecam_position: String,
+    facecam_shape: String,
 ) -> g9_core::Result<()> {
     use g9_capture::{Capturer, D3DContext, FacecamCompositor, GpuFrameCache};
     use g9_convert::Nv12Converter;
@@ -625,7 +633,13 @@ fn video_loop(
     // the game texture before NV12 conversion. Built lazily so a facecam that
     // fails to initialize never breaks the game-only broadcast.
     let mut compositor: Option<FacecamCompositor> = match &facecam {
-        Some(_) => match FacecamCompositor::new(&ctx, cfg.width, cfg.height) {
+        Some(_) => match FacecamCompositor::new(
+            &ctx,
+            cfg.width,
+            cfg.height,
+            &facecam_position,
+            &facecam_shape,
+        ) {
             Ok(c) => {
                 tracing::info!("facecam compositor ready; will composite camera over game");
                 Some(c)

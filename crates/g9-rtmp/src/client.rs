@@ -36,7 +36,9 @@ impl RtmpUrl {
         } else if let Some(r) = url.strip_prefix("rtmp://") {
             (false, r)
         } else {
-            return Err(Error::config("rtmp url must start with rtmp:// or rtmps://"));
+            return Err(Error::config(
+                "rtmp url must start with rtmp:// or rtmps://",
+            ));
         };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i + 1..]),
@@ -47,10 +49,7 @@ impl RtmpUrl {
                 h.to_string(),
                 p.parse().unwrap_or(if secure { 443 } else { 1935 }),
             ),
-            None => (
-                authority.to_string(),
-                if secure { 443 } else { 1935 },
-            ),
+            None => (authority.to_string(), if secure { 443 } else { 1935 }),
         };
         let app = path.trim_end_matches('/').to_string();
         Ok(RtmpUrl {
@@ -139,7 +138,10 @@ impl RtmpClient {
             Amf0::Object(vec![
                 ("app".into(), Amf0::String(url.app.clone())),
                 ("type".into(), Amf0::String("nonprivate".into())),
-                ("flashVer".into(), Amf0::String("FMLE/3.0 (compatible; Glitch9)".into())),
+                (
+                    "flashVer".into(),
+                    Amf0::String("FMLE/3.0 (compatible; Glitch9)".into()),
+                ),
                 ("tcUrl".into(), Amf0::String(url.tc_url())),
             ]),
         ]);
@@ -214,9 +216,13 @@ impl RtmpClient {
     /// Send one encoded video access unit (AVCC) at `timestamp_ms`.
     pub async fn send_video(&mut self, avcc: &[u8], is_key: bool, timestamp_ms: u32) -> Result<()> {
         let payload = flv::video_nalu(avcc, is_key);
-        let m = self
-            .writer
-            .encode_message(CSID_VIDEO, MSG_VIDEO, timestamp_ms, self.stream_id, &payload);
+        let m = self.writer.encode_message(
+            CSID_VIDEO,
+            MSG_VIDEO,
+            timestamp_ms,
+            self.stream_id,
+            &payload,
+        );
         self.conn.write_all(&m).await.map_err(wio)?;
         Ok(())
     }
@@ -235,9 +241,13 @@ impl RtmpClient {
     /// Send one AAC frame at `timestamp_ms`.
     pub async fn send_audio(&mut self, aac: &[u8], timestamp_ms: u32) -> Result<()> {
         let payload = flv::audio_data(aac);
-        let m = self
-            .writer
-            .encode_message(CSID_AUDIO, MSG_AUDIO, timestamp_ms, self.stream_id, &payload);
+        let m = self.writer.encode_message(
+            CSID_AUDIO,
+            MSG_AUDIO,
+            timestamp_ms,
+            self.stream_id,
+            &payload,
+        );
         self.conn.write_all(&m).await.map_err(wio)?;
         Ok(())
     }

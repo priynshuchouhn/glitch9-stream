@@ -94,9 +94,18 @@ impl WhipTransport {
                         "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a"
                             .to_owned(),
                     rtcp_feedback: vec![
-                        RTCPFeedback { typ: "nack".to_owned(), parameter: "".to_owned() },
-                        RTCPFeedback { typ: "nack".to_owned(), parameter: "pli".to_owned() },
-                        RTCPFeedback { typ: "ccm".to_owned(), parameter: "fir".to_owned() },
+                        RTCPFeedback {
+                            typ: "nack".to_owned(),
+                            parameter: "".to_owned(),
+                        },
+                        RTCPFeedback {
+                            typ: "nack".to_owned(),
+                            parameter: "pli".to_owned(),
+                        },
+                        RTCPFeedback {
+                            typ: "ccm".to_owned(),
+                            parameter: "fir".to_owned(),
+                        },
                     ],
                 },
                 payload_type: 102,
@@ -141,7 +150,10 @@ impl WhipTransport {
         if let Some(ip) = ip {
             se.set_interface_filter(Box::new(|_n: &str| true));
             se.set_nat_1to1_ips(
-                ip.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+                ip.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
                 webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
             );
         }
@@ -199,7 +211,11 @@ impl WhipTransport {
                         dropped.fetch_add(1, Ordering::Relaxed);
                         latest = next;
                     }
-                    let sample = Sample { data: latest.data.clone(), duration: frame_dur, ..Default::default() };
+                    let sample = Sample {
+                        data: latest.data.clone(),
+                        duration: frame_dur,
+                        ..Default::default()
+                    };
                     if track.write_sample(&sample).await.is_ok() {
                         bytes_sent.fetch_add(latest.data.len() as u64, Ordering::Relaxed);
                     }
@@ -210,7 +226,11 @@ impl WhipTransport {
             let track = audio_track;
             tokio::spawn(async move {
                 while let Some(pkt) = rx.recv().await {
-                    let sample = Sample { data: pkt.data.clone(), duration: Duration::from_millis(20), ..Default::default() };
+                    let sample = Sample {
+                        data: pkt.data.clone(),
+                        duration: Duration::from_millis(20),
+                        ..Default::default()
+                    };
                     let _ = track.write_sample(&sample).await;
                 }
             });
@@ -225,7 +245,8 @@ impl MediaTransport for WhipTransport {
     }
 
     async fn start(&self) -> Result<()> {
-        self.state.store(TransportState::Connecting as u8, Ordering::Relaxed);
+        self.state
+            .store(TransportState::Connecting as u8, Ordering::Relaxed);
         let api = Self::build_api(&self.public_ip)?;
         let (video_track, audio_track) = self.make_tracks();
 
@@ -300,7 +321,9 @@ impl MediaTransport for WhipTransport {
     fn send_video(&self, frame: SharedEncodedFrame) {
         match self.video_tx.try_send(frame) {
             Ok(_) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => { self.dropped.fetch_add(1, Ordering::Relaxed); }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
             Err(_) => {}
         }
     }
@@ -330,7 +353,8 @@ impl MediaTransport for WhipTransport {
     }
 
     async fn stop(&self) {
-        self.state.store(TransportState::Stopped as u8, Ordering::Relaxed);
+        self.state
+            .store(TransportState::Stopped as u8, Ordering::Relaxed);
     }
 }
 
@@ -364,7 +388,10 @@ async fn whip_post(url: &str, token: &str, sdp_offer: &str) -> anyhow::Result<St
     let status_line = head.lines().next().unwrap_or("");
     // WHIP success is 201 Created (some servers use 200).
     if !(status_line.contains(" 201") || status_line.contains(" 200")) {
-        anyhow::bail!("WHIP server returned: {status_line} — body: {}", body.trim());
+        anyhow::bail!(
+            "WHIP server returned: {status_line} — body: {}",
+            body.trim()
+        );
     }
     Ok(body.to_string())
 }

@@ -91,9 +91,9 @@ impl AacEncoder {
 mod windows_mft {
     use g9_core::{Error, Result};
     use windows::Win32::Media::MediaFoundation::{
-        IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
-        MFCreateSample, MFStartup, MFTEnumEx, MFAudioFormat_AAC, MFAudioFormat_PCM,
-        MFMediaType_Audio, MFSTARTUP_LITE, MFT_CATEGORY_AUDIO_ENCODER, MFT_ENUM_FLAG_SORTANDFILTER,
+        IMFMediaType, IMFSample, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM,
+        MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Audio, MFStartup,
+        MFTEnumEx, MFSTARTUP_LITE, MFT_CATEGORY_AUDIO_ENCODER, MFT_ENUM_FLAG_SORTANDFILTER,
         MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
         MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
         MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_REGISTER_TYPE_INFO,
@@ -293,17 +293,15 @@ mod windows_mft {
         channels: u8,
         bitrate_bps: u32,
     ) -> Result<()> {
-        let t: IMFMediaType =
-            MFCreateMediaType().map_err(|e| Error::audio(format!("MFCreateMediaType(out): {e}")))?;
+        let t: IMFMediaType = MFCreateMediaType()
+            .map_err(|e| Error::audio(format!("MFCreateMediaType(out): {e}")))?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
             .and_then(|_| t.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC))
             .and_then(|_| t.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, PCM_BITS_PER_SAMPLE))
             .and_then(|_| t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate))
             .and_then(|_| t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32))
             // MF wants the AAC average BYTES per second, not bits.
-            .and_then(|_| {
-                t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitrate_bps / 8)
-            })
+            .and_then(|_| t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitrate_bps / 8))
             // Payload type 0 = raw AAC (no ADTS/LATM), matching FLV/RTMP.
             .and_then(|_| t.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0))
             .map_err(|e| Error::audio(format!("set AAC output type: {e}")))?;
@@ -332,7 +330,11 @@ mod windows_mft {
     }
 
     /// Wrap interleaved s16 PCM bytes in an `IMFSample` with a timestamp + duration.
-    unsafe fn wrap_pcm_sample(pcm: &[u8], time_100ns: i64, duration_100ns: i64) -> Result<IMFSample> {
+    unsafe fn wrap_pcm_sample(
+        pcm: &[u8],
+        time_100ns: i64,
+        duration_100ns: i64,
+    ) -> Result<IMFSample> {
         let buffer = MFCreateMemoryBuffer(pcm.len() as u32)
             .map_err(|e| Error::audio(format!("MFCreateMemoryBuffer(in): {e}")))?;
         let mut ptr: *mut u8 = std::ptr::null_mut();
@@ -370,5 +372,3 @@ mod windows_mft {
         Ok(Some(bytes))
     }
 }
-
-

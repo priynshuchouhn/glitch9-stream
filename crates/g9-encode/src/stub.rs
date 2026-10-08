@@ -26,7 +26,9 @@ impl NvencEncoder {
 
     /// Encode one NV12 GPU texture. Returns an encoded H.264 access unit.
     pub fn encode(&mut self, _nv12: &GpuTextureFrame) -> Result<Option<EncodedFrame>> {
-        Err(Error::Unsupported("NVENC is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "NVENC is only available on Windows".into(),
+        ))
     }
 
     /// Request the next encoded frame be an IDR (e.g. new viewer / PLI / reconnect).

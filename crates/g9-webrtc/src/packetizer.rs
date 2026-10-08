@@ -30,11 +30,7 @@ pub struct RtpPayload {
 ///
 /// `sps`/`pps` are prepended (as single-NAL packets) when the access unit is a
 /// keyframe, so viewers that join mid-stream get decoder config with the IDR.
-pub fn packetize(
-    annexb: &[u8],
-    sps: Option<&[u8]>,
-    pps: Option<&[u8]>,
-) -> Vec<RtpPayload> {
+pub fn packetize(annexb: &[u8], sps: Option<&[u8]>, pps: Option<&[u8]>) -> Vec<RtpPayload> {
     let mut nals: Vec<Vec<u8>> = Vec::new();
 
     let is_key = annexb_contains_idr(annexb);
@@ -137,7 +133,7 @@ mod tests {
         // First fragment has Start bit.
         assert_eq!(p[0].data[0] & 0x1F, 28); // FU-A
         assert_eq!(p[0].data[1] & 0x80, 0x80); // S bit
-        // Last fragment has End bit + marker.
+                                               // Last fragment has End bit + marker.
         let last = p.last().unwrap();
         assert_eq!(last.data[1] & 0x40, 0x40); // E bit
         assert!(last.marker);

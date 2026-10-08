@@ -12,7 +12,9 @@ impl WasapiCapture {
         ))
     }
     pub fn read(&mut self) -> Result<Option<PcmChunk>> {
-        Err(Error::Unsupported("WASAPI is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "WASAPI is only available on Windows".into(),
+        ))
     }
     pub fn sample_rate(&self) -> u32 {
         48000
@@ -31,7 +33,9 @@ impl AacEncoder {
         ))
     }
     pub fn encode(&mut self, _pcm: &PcmChunk) -> Result<Vec<AudioPacket>> {
-        Err(Error::Unsupported("AAC encode is only available on Windows".into()))
+        Err(Error::Unsupported(
+            "AAC encode is only available on Windows".into(),
+        ))
     }
 }
 
@@ -46,7 +50,9 @@ impl OpusEncoder {
         ))
     }
     pub fn encode(&mut self, _pcm: &PcmChunk) -> Result<Vec<AudioPacket>> {
-        Err(Error::Unsupported("Opus encode available on the Windows target".into()))
+        Err(Error::Unsupported(
+            "Opus encode available on the Windows target".into(),
+        ))
     }
 }
 

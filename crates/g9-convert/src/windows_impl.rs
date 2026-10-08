@@ -21,8 +21,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
@@ -105,15 +105,21 @@ impl Nv12Converter {
             // Output view onto the NV12 texture.
             let ov_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-                Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                    Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_VPOV {
-                        MipSlice: 0,
+                Anonymous:
+                    windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                        Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_VPOV {
+                            MipSlice: 0,
+                        },
                     },
-                },
             };
             let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
             video_device
-                .CreateVideoProcessorOutputView(&nv12_out, &enumerator, &ov_desc, Some(&mut output_view))
+                .CreateVideoProcessorOutputView(
+                    &nv12_out,
+                    &enumerator,
+                    &ov_desc,
+                    Some(&mut output_view),
+                )
                 .map_err(|e| Error::convert(format!("CreateVideoProcessorOutputView: {e}")))?;
             let output_view = output_view.ok_or_else(|| Error::convert("null output view"))?;
 
@@ -150,16 +156,22 @@ impl Nv12Converter {
             let iv_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0, // use the texture's own format (BGRA)
                 ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                    Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_VPIV {
-                        MipSlice: 0,
-                        ArraySlice: 0,
+                Anonymous:
+                    windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                        Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_VPIV {
+                            MipSlice: 0,
+                            ArraySlice: 0,
+                        },
                     },
-                },
             };
             let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
             self.video_device
-                .CreateVideoProcessorInputView(input_tex, &self.enumerator, &iv_desc, Some(&mut input_view))
+                .CreateVideoProcessorInputView(
+                    input_tex,
+                    &self.enumerator,
+                    &iv_desc,
+                    Some(&mut input_view),
+                )
                 .map_err(|e| Error::convert(format!("CreateVideoProcessorInputView: {e}")))?;
             let input_view = input_view.ok_or_else(|| Error::convert("null input view"))?;
 

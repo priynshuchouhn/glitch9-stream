@@ -122,8 +122,8 @@ impl D3DContext {
     /// `preferred_adapter` is given, use that index instead.
     pub fn new(preferred_adapter: Option<u32>) -> Result<Self> {
         unsafe {
-            let factory: IDXGIFactory1 =
-                CreateDXGIFactory1().map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()
+                .map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
 
             let adapter = select_adapter(&factory, preferred_adapter)?;
 
@@ -157,8 +157,8 @@ impl D3DContext {
     /// Enumerate all adapters (for `--list-displays`).
     pub fn enumerate_adapters() -> Result<Vec<AdapterInfo>> {
         unsafe {
-            let factory: IDXGIFactory1 =
-                CreateDXGIFactory1().map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()
+                .map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
             let mut out = Vec::new();
             let mut i = 0u32;
             loop {
@@ -194,8 +194,8 @@ impl D3DContext {
     /// Enumerate all display outputs across all adapters (for `--display N`).
     pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
         unsafe {
-            let factory: IDXGIFactory1 =
-                CreateDXGIFactory1().map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()
+                .map_err(|e| Error::capture(format!("CreateDXGIFactory1: {e}")))?;
             let mut out = Vec::new();
             let mut global_index = 0u32;
             let mut ai = 0u32;
@@ -241,10 +241,7 @@ impl D3DContext {
 }
 
 /// Pick the adapter: explicit index if given, else first NVIDIA, else adapter 0.
-unsafe fn select_adapter(
-    factory: &IDXGIFactory1,
-    preferred: Option<u32>,
-) -> Result<IDXGIAdapter1> {
+unsafe fn select_adapter(factory: &IDXGIFactory1, preferred: Option<u32>) -> Result<IDXGIAdapter1> {
     if let Some(idx) = preferred {
         return factory
             .EnumAdapters1(idx)
@@ -376,7 +373,7 @@ impl Capturer {
     /// texture, Map it, and write BGRA->RGB as binary PPM (P6).
     pub fn dump_one_frame(&mut self, ctx: &D3DContext, path: &str) -> Result<(u32, u32)> {
         use windows::Win32::Graphics::Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+            D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
             D3D11_USAGE_STAGING,
         };
         unsafe {
@@ -414,9 +411,7 @@ impl Capturer {
             staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             staging_desc.MiscFlags = 0;
 
-            let mut staging: Option<
-                windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
-            > = None;
+            let mut staging: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D> = None;
             ctx.device()
                 .CreateTexture2D(&staging_desc, None, Some(&mut staging))
                 .map_err(|e| Error::capture(format!("CreateTexture2D(staging): {e}")))?;
@@ -450,8 +445,7 @@ impl Capturer {
             }
             ctx.context().Unmap(&staging, 0);
 
-            std::fs::write(path, &ppm)
-                .map_err(|e| Error::capture(format!("write {path}: {e}")))?;
+            std::fs::write(path, &ppm).map_err(|e| Error::capture(format!("write {path}: {e}")))?;
 
             let mean = sum as f64 / (w as f64 * h as f64 * 3.0);
             tracing::info!(

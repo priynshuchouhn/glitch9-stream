@@ -25,8 +25,10 @@ use tokio::sync::mpsc;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::APIBuilder;
 use webrtc::interceptor::registry::Registry;
+use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
@@ -34,8 +36,6 @@ use webrtc::rtp_transceiver::rtp_codec::{
 use webrtc::rtp_transceiver::RTCPFeedback;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
-use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
-use webrtc::media::Sample;
 
 const VIDEO_QUEUE_DEPTH: usize = 8;
 const AUDIO_QUEUE_DEPTH: usize = 32;
@@ -147,10 +147,22 @@ impl WebRtcTransport {
                     // the first IDR — it just shows black until the next periodic
                     // keyframe (~4s). With PLI wired to force_idr, it self-heals.
                     rtcp_feedback: vec![
-                        RTCPFeedback { typ: "nack".to_owned(), parameter: "".to_owned() },
-                        RTCPFeedback { typ: "nack".to_owned(), parameter: "pli".to_owned() },
-                        RTCPFeedback { typ: "ccm".to_owned(), parameter: "fir".to_owned() },
-                        RTCPFeedback { typ: "goog-remb".to_owned(), parameter: "".to_owned() },
+                        RTCPFeedback {
+                            typ: "nack".to_owned(),
+                            parameter: "".to_owned(),
+                        },
+                        RTCPFeedback {
+                            typ: "nack".to_owned(),
+                            parameter: "pli".to_owned(),
+                        },
+                        RTCPFeedback {
+                            typ: "ccm".to_owned(),
+                            parameter: "fir".to_owned(),
+                        },
+                        RTCPFeedback {
+                            typ: "goog-remb".to_owned(),
+                            parameter: "".to_owned(),
+                        },
                     ],
                 },
                 payload_type: 102,

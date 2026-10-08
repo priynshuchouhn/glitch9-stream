@@ -20,9 +20,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_WRITE,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 
 // The package is `env-libvpx-sys` but its library crate is named `vpx_sys`.
 use vpx_sys::{
@@ -196,7 +194,7 @@ impl Vp8Decoder {
             0,
             None,
             self.nv12.as_ptr() as *const core::ffi::c_void,
-            w, // row pitch for the luma plane
+            w,     // row pitch for the luma plane
             w * h, // depth pitch (start of chroma) — luma plane size
         );
 

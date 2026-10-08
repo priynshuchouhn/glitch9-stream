@@ -16,7 +16,13 @@ pub enum FacecamCodec {
 pub struct FacecamCompositor;
 
 impl FacecamCompositor {
-    pub fn new(_ctx: &D3DContext, _w: u32, _h: u32) -> Result<Self> {
+    pub fn new(
+        _ctx: &D3DContext,
+        _w: u32,
+        _h: u32,
+        _position: &str,
+        _shape: &str,
+    ) -> Result<Self> {
         Err(Error::capture("facecam compositor is Windows-only"))
     }
     pub fn update_camera(&mut self, _codec: FacecamCodec, _data: &[u8]) -> Result<()> {

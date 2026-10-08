@@ -5,9 +5,9 @@
 pub use g9_core::h264::{self, extract_parameter_sets};
 
 #[cfg(windows)]
-mod nvenc_ffi;
-#[cfg(windows)]
 mod nvenc;
+#[cfg(windows)]
+mod nvenc_ffi;
 #[cfg(windows)]
 pub use nvenc::NvencEncoder;
 

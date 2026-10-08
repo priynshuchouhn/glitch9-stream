@@ -11,14 +11,14 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, CREATE_ALWAYS, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_ATTRIBUTE_NORMAL,
+    CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
-    WTSEnumerateProcessesW, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW,
-    WTSQueryUserToken, WTSUserName, WTSActive, WTS_PROCESS_INFOW, WTS_SESSION_INFOW,
-    WTS_CURRENT_SERVER_HANDLE,
+    WTSActive, WTSEnumerateProcessesW, WTSEnumerateSessionsW, WTSFreeMemory,
+    WTSQuerySessionInformationW, WTSQueryUserToken, WTSUserName, WTS_CURRENT_SERVER_HANDLE,
+    WTS_PROCESS_INFOW, WTS_SESSION_INFOW,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
@@ -62,7 +62,11 @@ pub fn resolve_public_ip(cfg: &Config) -> String {
     }
     // 1) External echo (works when the VM has outbound internet; gives the routable
     //    public IP even behind 1:1 NAT). Short timeout; best-effort.
-    for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"] {
+    for url in [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ] {
         if let Ok(out) = std::process::Command::new("curl")
             .args(["-s", "--max-time", "4", url])
             .output()
@@ -97,7 +101,11 @@ fn primary_local_ipv4() -> Option<String> {
         .output()
         .ok()?;
     let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if is_ipv4(&ip) { Some(ip) } else { None }
+    if is_ipv4(&ip) {
+        Some(ip)
+    } else {
+        None
+    }
 }
 
 /// Orchestration signal: a session is "broadcastable" if session-api dropped a
@@ -141,6 +149,10 @@ pub struct BroadcastConfig {
     /// WHEP URL of the player's browser-published facecam (cam + mic), which the
     /// engine subscribes to and composites over the game before encode (optional).
     pub cam_whep_url: Option<String>,
+    /// Corner in which the engine composites the facecam.
+    pub facecam_position: Option<String>,
+    /// Aspect shape used for the facecam overlay.
+    pub facecam_shape: Option<String>,
 }
 
 impl BroadcastConfig {
@@ -175,6 +187,8 @@ pub fn read_broadcast_config(cfg: &Config, user: &str) -> BroadcastConfig {
     bc.rtmp_url = json_str(&text, "rtmpUrl").filter(|s| !s.is_empty());
     bc.stream_key = json_str(&text, "streamKey").filter(|s| !s.is_empty());
     bc.cam_whep_url = json_str(&text, "camWhepUrl").filter(|s| !s.is_empty());
+    bc.facecam_position = json_str(&text, "facecamPosition").filter(|s| !s.is_empty());
+    bc.facecam_shape = json_str(&text, "facecamShape").filter(|s| !s.is_empty());
     bc
 }
 
@@ -202,17 +216,48 @@ pub fn session_is_active(cfg: &Config, session: &GamerSession) -> bool {
 /// has any process beyond these, we treat it as "a game is running". Lowercased.
 const INFRA_PROCESSES: &[&str] = &[
     // Windows shell / session infrastructure
-    "explorer.exe", "svchost.exe", "sihost.exe", "taskhostw.exe", "rdpclip.exe",
-    "conhost.exe", "ctfmon.exe", "dllhost.exe", "shellhost.exe", "runtimebroker.exe",
-    "wwahost.exe", "dwm.exe", "csrss.exe", "winlogon.exe", "userinit.exe",
-    "fontdrvhost.exe", "searchhost.exe", "startmenuexperiencehost.exe",
-    "textinputhost.exe", "smartscreen.exe", "wmiprvse.exe", "audiodg.exe",
-    "applicationframehost.exe", "systemsettings.exe", "lsass.exe", "services.exe",
+    "explorer.exe",
+    "svchost.exe",
+    "sihost.exe",
+    "taskhostw.exe",
+    "rdpclip.exe",
+    "conhost.exe",
+    "ctfmon.exe",
+    "dllhost.exe",
+    "shellhost.exe",
+    "runtimebroker.exe",
+    "wwahost.exe",
+    "dwm.exe",
+    "csrss.exe",
+    "winlogon.exe",
+    "userinit.exe",
+    "fontdrvhost.exe",
+    "searchhost.exe",
+    "startmenuexperiencehost.exe",
+    "textinputhost.exe",
+    "smartscreen.exe",
+    "wmiprvse.exe",
+    "audiodg.exe",
+    "applicationframehost.exe",
+    "systemsettings.exe",
+    "lsass.exe",
+    "services.exe",
     // Vendor/host agents + our own stack (never count these as a game)
-    "rhinostream.exe", "rhinostreamv2.exe", "glitch9-stream.exe", "glitch9-manager.exe",
-    "azurearcsystray.exe", "xboxstat.exe", "gigabytedownloadassistant.exe",
-    "mstsc.exe", "psexec64.exe", "psexesvc.exe", "cmd.exe", "powershell.exe",
-    "nvcontainer.exe", "nvidia web helper.exe", "nvdisplay.container.exe",
+    "rhinostream.exe",
+    "rhinostreamv2.exe",
+    "glitch9-stream.exe",
+    "glitch9-manager.exe",
+    "azurearcsystray.exe",
+    "xboxstat.exe",
+    "gigabytedownloadassistant.exe",
+    "mstsc.exe",
+    "psexec64.exe",
+    "psexesvc.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "nvcontainer.exe",
+    "nvidia web helper.exe",
+    "nvdisplay.container.exe",
 ];
 
 /// Does this session have an active game? True if it has any process that isn't
@@ -278,7 +323,10 @@ fn matches_pattern(user: &str, pattern: &str) -> bool {
             .unwrap_or(false)
     } else {
         // Strip common regex anchors and treat the rest as a substring.
-        let p = pattern.trim_start_matches('^').trim_end_matches('$').to_ascii_lowercase();
+        let p = pattern
+            .trim_start_matches('^')
+            .trim_end_matches('$')
+            .to_ascii_lowercase();
         u.contains(&p)
     }
 }
@@ -313,24 +361,37 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
     // Facecam: when the player is publishing a browser cam+mic, the engine
     // subscribes to it (WHEP) and composites it over the game before encode.
     let facecam_flag = match bc.cam_whep_url.as_ref() {
-        Some(url) if youtube => format!(" --facecam-whep {url}"),
+        Some(url) if youtube => format!(
+            " --facecam-whep {url} --facecam-position {} --facecam-shape {}",
+            bc.facecam_position.as_deref().unwrap_or("bottom-right"),
+            bc.facecam_shape.as_deref().unwrap_or("landscape")
+        ),
         _ => String::new(),
     };
-    let cmdline = match bc.whip_url() {
-        Some(whip_url) => format!(
-            "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
+    let cmdline =
+        match bc.whip_url() {
+            Some(whip_url) => format!(
+                "\"{engine}\" --publish-whip {whip} --display 0 --width {w} --height {h} \
              --fps {fps} --bitrate {br} --audio true --ready-file \"{ready}\"{rtmp}{cam}",
-            engine = cfg.engine, whip = whip_url, w = cfg.width, h = cfg.height,
-            fps = cfg.fps, br = cfg.bitrate, ready = ready_file,
-            rtmp = rtmp_flag, cam = facecam_flag,
-        ),
-        None => format!(
+                engine = cfg.engine,
+                whip = whip_url,
+                w = cfg.width,
+                h = cfg.height,
+                fps = cfg.fps,
+                br = cfg.bitrate,
+                ready = ready_file,
+                rtmp = rtmp_flag,
+                cam = facecam_flag,
+            ),
+            None => {
+                format!(
             "\"{engine}\" --bind 0.0.0.0 --port {port} --display 0 --width {w} --height {h} \
              --fps {fps} --bitrate {br} --audio true",
             engine = cfg.engine, port = port, w = cfg.width, h = cfg.height,
             fps = cfg.fps, br = cfg.bitrate,
-        ),
-    };
+        )
+            }
+        };
 
     unsafe {
         // Session user token → process runs in that session/desktop.
@@ -386,8 +447,7 @@ fn launch_in_session(session: &GamerSession, cfg: &Config) -> Result<u32> {
         si.hStdError = log_handle;
         let mut pi = PROCESS_INFORMATION::default();
 
-        let mut cwd_utf16: Vec<u16> =
-            dir.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut cwd_utf16: Vec<u16> = dir.encode_utf16().chain(std::iter::once(0)).collect();
 
         let flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
         let result = CreateProcessAsUserW(
@@ -430,7 +490,11 @@ fn add_env_var(block: Vec<u16>, name: &str, value: &str) -> Vec<u16> {
         }
     }
     let upper = format!("{}=", name).to_ascii_uppercase();
-    entries.retain(|e| !String::from_utf16_lossy(e).to_ascii_uppercase().starts_with(&upper));
+    entries.retain(|e| {
+        !String::from_utf16_lossy(e)
+            .to_ascii_uppercase()
+            .starts_with(&upper)
+    });
     entries.push(format!("{name}={value}").encode_utf16().collect());
     let mut out: Vec<u16> = Vec::new();
     for e in entries {
@@ -489,7 +553,9 @@ pub fn start(cfg: &Config) -> Result<()> {
     if is_system() {
         return start_system(cfg);
     }
-    tracing::info!("not running as SYSTEM; triggering the '{TASK_NAME}' SYSTEM task to start broadcasts");
+    tracing::info!(
+        "not running as SYSTEM; triggering the '{TASK_NAME}' SYSTEM task to start broadcasts"
+    );
     let run_st = std::process::Command::new("schtasks")
         .args(["/run", "/tn", TASK_NAME])
         .status()
@@ -512,7 +578,10 @@ pub fn start_system(base: &Config) -> Result<()> {
     let cfg = &load_config_file(base);
     let sessions = enumerate_gamer_sessions(cfg)?;
     if sessions.is_empty() {
-        tracing::warn!("no active gamer sessions found (pattern {})", cfg.user_pattern);
+        tracing::warn!(
+            "no active gamer sessions found (pattern {})",
+            cfg.user_pattern
+        );
         return Ok(());
     }
     let public_ip = resolve_public_ip(cfg);
@@ -521,13 +590,22 @@ pub fn start_system(base: &Config) -> Result<()> {
         // (orchestration broadcast.json, or the process-scan fallback). Don't burn a
         // GPU encoder on an idle/unprovisioned desktop.
         if !session_is_active(cfg, s) {
-            tracing::info!("skip {} (session {}): not an active broadcast session", s.user, s.id);
+            tracing::info!(
+                "skip {} (session {}): not an active broadcast session",
+                s.user,
+                s.id
+            );
             continue;
         }
         match launch_in_session(s, cfg) {
             Ok(pid) => tracing::info!(
                 "started broadcast: {} (session {}) -> port {} [pid {}]  http://{}:{}/",
-                s.user, s.id, s.port(cfg.base_port), pid, public_ip, s.port(cfg.base_port)
+                s.user,
+                s.id,
+                s.port(cfg.base_port),
+                pid,
+                public_ip,
+                s.port(cfg.base_port)
             ),
             Err(e) => tracing::error!("failed to start session {} ({}): {e:#}", s.id, s.user),
         }
@@ -587,7 +665,9 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
 
     tracing::info!(
         "watch: reconciling + health-checking broadcasts every {}s (source={:?}, pattern {})",
-        interval_secs, cfg.source, cfg.user_pattern
+        interval_secs,
+        cfg.source,
+        cfg.user_pattern
     );
     let mut workers: std::collections::HashMap<u32, WorkerState> = std::collections::HashMap::new();
 
@@ -660,7 +740,11 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                             st.unhealthy_polls += 1;
                             tracing::warn!(
                                 "worker session {} (pid {}, whip={}) unhealthy ({}/{})",
-                                s.id, st.pid, st.whip, st.unhealthy_polls, UNHEALTHY_RESTART_THRESHOLD
+                                s.id,
+                                st.pid,
+                                st.whip,
+                                st.unhealthy_polls,
+                                UNHEALTHY_RESTART_THRESHOLD
                             );
                             st.unhealthy_polls >= UNHEALTHY_RESTART_THRESHOLD
                         }
@@ -672,7 +756,11 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                         );
                         // Stop the old worker precisely (by PID for WHIP, by port for
                         // direct) before relaunching, so we never stack engines.
-                        if st.whip { stop_pid(st.pid); } else { stop_port(port); }
+                        if st.whip {
+                            stop_pid(st.pid);
+                        } else {
+                            stop_port(port);
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         match launch_in_session(s, cfg) {
                             Ok(pid) => {
@@ -680,7 +768,13 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                                     "restarted broadcast {} (session {}) [pid {}] room={} youtube={}",
                                     s.user, s.id, pid, session_id, youtube
                                 );
-                                *st = WorkerState { pid, whip, youtube, session_id: session_id.clone(), ..Default::default() };
+                                *st = WorkerState {
+                                    pid,
+                                    whip,
+                                    youtube,
+                                    session_id: session_id.clone(),
+                                    ..Default::default()
+                                };
                             }
                             Err(e) => {
                                 tracing::error!("restart session {} failed: {e:#}", s.id);
@@ -704,7 +798,16 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
                                 "session active -> broadcast {} (session {}) [pid {}] whip={} room={}",
                                 s.user, s.id, pid, whip, session_id
                             );
-                            workers.insert(s.id, WorkerState { pid, whip, youtube, session_id: session_id.clone(), ..Default::default() });
+                            workers.insert(
+                                s.id,
+                                WorkerState {
+                                    pid,
+                                    whip,
+                                    youtube,
+                                    session_id: session_id.clone(),
+                                    ..Default::default()
+                                },
+                            );
                         }
                         Err(e) => tracing::error!("spawn session {} failed: {e:#}", s.id),
                     }
@@ -713,12 +816,24 @@ pub fn watch(base: &Config, interval_secs: u64) -> Result<()> {
         }
 
         // Stop workers whose session ended (or vanished).
-        let to_stop: Vec<u32> = workers.keys().copied().filter(|id| !active.contains(id)).collect();
+        let to_stop: Vec<u32> = workers
+            .keys()
+            .copied()
+            .filter(|id| !active.contains(id))
+            .collect();
         for id in to_stop {
             if let Some(st) = workers.remove(&id) {
-                tracing::info!("session ended -> stopping broadcast for session {} (pid {})", id, st.pid);
+                tracing::info!(
+                    "session ended -> stopping broadcast for session {} (pid {})",
+                    id,
+                    st.pid
+                );
                 // Stop by PID for WHIP workers (no port); by port for direct ones.
-                if st.whip { stop_pid(st.pid); } else { stop_port(cfg.base_port.saturating_add(id as u16)); }
+                if st.whip {
+                    stop_pid(st.pid);
+                } else {
+                    stop_port(cfg.base_port.saturating_add(id as u16));
+                }
             }
         }
 
@@ -748,7 +863,11 @@ fn poll_health(port: u16) -> Option<Health> {
 fn extract_u64(s: &str, key: &str) -> Option<u64> {
     let i = s.find(key)? + key.len();
     let rest = &s[i..];
-    let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -822,8 +941,8 @@ pub fn deploy(cfg: &Config) -> Result<()> {
     let tr = format!("\"{exe}\" watch");
     let status = std::process::Command::new("schtasks")
         .args([
-            "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "once", "/st", "00:00",
-            "/ru", "SYSTEM", "/rl", "HIGHEST", "/f",
+            "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "once", "/st", "00:00", "/ru",
+            "SYSTEM", "/rl", "HIGHEST", "/f",
         ])
         .status()
         .context("schtasks /create")?;
@@ -874,23 +993,51 @@ fn load_config_file(base: &Config) -> Config {
         Err(_) => return cfg,
     };
     for line in text.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let v = v.trim().to_string();
         match k.trim() {
-            "base_port" => if let Ok(x) = v.parse() { cfg.base_port = x },
+            "base_port" => {
+                if let Ok(x) = v.parse() {
+                    cfg.base_port = x
+                }
+            }
             "public_ip" => cfg.public_ip = if v.is_empty() { None } else { Some(v) },
             "engine" => cfg.engine = v,
-            "source" => cfg.source = if v == "process" {
-                crate::cli::Source::Process
-            } else {
-                crate::cli::Source::Orchestration
-            },
+            "source" => {
+                cfg.source = if v == "process" {
+                    crate::cli::Source::Process
+                } else {
+                    crate::cli::Source::Orchestration
+                }
+            }
             "config_root" => cfg.config_root = v,
-            "max_broadcasts" => if let Ok(x) = v.parse() { cfg.max_broadcasts = x },
-            "width" => if let Ok(x) = v.parse() { cfg.width = x },
-            "height" => if let Ok(x) = v.parse() { cfg.height = x },
-            "fps" => if let Ok(x) = v.parse() { cfg.fps = x },
-            "bitrate" => if let Ok(x) = v.parse() { cfg.bitrate = x },
+            "max_broadcasts" => {
+                if let Ok(x) = v.parse() {
+                    cfg.max_broadcasts = x
+                }
+            }
+            "width" => {
+                if let Ok(x) = v.parse() {
+                    cfg.width = x
+                }
+            }
+            "height" => {
+                if let Ok(x) = v.parse() {
+                    cfg.height = x
+                }
+            }
+            "fps" => {
+                if let Ok(x) = v.parse() {
+                    cfg.fps = x
+                }
+            }
+            "bitrate" => {
+                if let Ok(x) = v.parse() {
+                    cfg.bitrate = x
+                }
+            }
             "user_pattern" => cfg.user_pattern = v,
             "log_dir" => cfg.log_dir = v,
             _ => {}
@@ -921,8 +1068,16 @@ pub fn install_service(cfg: &Config) -> Result<()> {
     let bin = format!("\"{exe}\" run-service");
     let create = std::process::Command::new("sc")
         .args([
-            "create", SERVICE_NAME, "binPath=", &bin, "start=", "auto",
-            "obj=", "LocalSystem", "DisplayName=", "Glitch9 Broadcast Manager",
+            "create",
+            SERVICE_NAME,
+            "binPath=",
+            &bin,
+            "start=",
+            "auto",
+            "obj=",
+            "LocalSystem",
+            "DisplayName=",
+            "Glitch9 Broadcast Manager",
         ])
         .status()
         .context("sc create")?;
@@ -934,12 +1089,26 @@ pub fn install_service(cfg: &Config) -> Result<()> {
     }
     // Restart on failure (SCM auto-recovery): reset count daily, 5s/10s/30s backoff.
     let _ = std::process::Command::new("sc")
-        .args(["failure", SERVICE_NAME, "reset=", "86400", "actions=", "restart/5000/restart/10000/restart/30000"])
+        .args([
+            "failure",
+            SERVICE_NAME,
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/5000/restart/10000/restart/30000",
+        ])
         .status();
-    let _ = std::process::Command::new("sc").args(["description", SERVICE_NAME,
-        "Spawns/stops glitch9-stream broadcast workers per active game session."]).status();
+    let _ = std::process::Command::new("sc")
+        .args([
+            "description",
+            SERVICE_NAME,
+            "Spawns/stops glitch9-stream broadcast workers per active game session.",
+        ])
+        .status();
     // Start it now.
-    let start = std::process::Command::new("sc").args(["start", SERVICE_NAME]).status();
+    let start = std::process::Command::new("sc")
+        .args(["start", SERVICE_NAME])
+        .status();
     tracing::info!(
         "installed service '{SERVICE_NAME}' (auto-start, LocalSystem, auto-restart). start: {:?}",
         start.map(|s| s.success()).unwrap_or(false)
@@ -948,11 +1117,20 @@ pub fn install_service(cfg: &Config) -> Result<()> {
 }
 
 pub fn uninstall_service() -> Result<()> {
-    let _ = std::process::Command::new("sc").args(["stop", SERVICE_NAME]).status();
+    let _ = std::process::Command::new("sc")
+        .args(["stop", SERVICE_NAME])
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = std::process::Command::new("taskkill").args(["/im", "glitch9-stream.exe", "/f"]).status();
-    let del = std::process::Command::new("sc").args(["delete", SERVICE_NAME]).status();
-    tracing::info!("uninstalled service '{SERVICE_NAME}': {:?}", del.map(|s| s.success()).unwrap_or(false));
+    let _ = std::process::Command::new("taskkill")
+        .args(["/im", "glitch9-stream.exe", "/f"])
+        .status();
+    let del = std::process::Command::new("sc")
+        .args(["delete", SERVICE_NAME])
+        .status();
+    tracing::info!(
+        "uninstalled service '{SERVICE_NAME}': {:?}",
+        del.map(|s| s.success()).unwrap_or(false)
+    );
     Ok(())
 }
 
@@ -966,11 +1144,12 @@ static mut STATUS_HANDLE: isize = 0;
 
 pub fn run_service() -> Result<()> {
     use windows::core::PWSTR;
-    use windows::Win32::System::Services::{
-        StartServiceCtrlDispatcherW, SERVICE_TABLE_ENTRYW,
-    };
+    use windows::Win32::System::Services::{StartServiceCtrlDispatcherW, SERVICE_TABLE_ENTRYW};
     unsafe {
-        let mut name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut name: Vec<u16> = SERVICE_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let table = [
             SERVICE_TABLE_ENTRYW {
                 lpServiceName: PWSTR(name.as_mut_ptr()),
@@ -1003,7 +1182,10 @@ unsafe extern "system" fn service_ctrl_handler(control: u32) {
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows::core::PWSTR) {
     use windows::core::PCWSTR;
     use windows::Win32::System::Services::RegisterServiceCtrlHandlerW;
-    let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = SERVICE_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     match RegisterServiceCtrlHandlerW(PCWSTR(name.as_ptr()), Some(service_ctrl_handler)) {
         Ok(h) => STATUS_HANDLE = h.0 as isize,
         Err(_) => return,
@@ -1029,8 +1211,8 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows::core::PW
 /// Report service state to the SCM.
 unsafe fn set_service_state(state: u32, controls: u32) {
     use windows::Win32::System::Services::{
-        SetServiceStatus, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STATUS_CURRENT_STATE,
-        ENUM_SERVICE_TYPE,
+        SetServiceStatus, ENUM_SERVICE_TYPE, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE,
+        SERVICE_STATUS_HANDLE,
     };
     if STATUS_HANDLE == 0 {
         return;
@@ -1101,7 +1283,10 @@ pub fn status(base: &Config) -> Result<()> {
     let cfg = &load_config_file(base);
     let ip = resolve_public_ip(cfg);
     let sessions = enumerate_gamer_sessions(cfg)?;
-    println!("Active gamer sessions and broadcast ports (source={:?}):", cfg.source);
+    println!(
+        "Active gamer sessions and broadcast ports (source={:?}):",
+        cfg.source
+    );
     for s in &sessions {
         let port = s.port(cfg.base_port);
         let live = port_listening(port);
@@ -1116,7 +1301,11 @@ pub fn status(base: &Config) -> Result<()> {
             } else {
                 "stopped".to_string()
             },
-            if want && !live { "  (active session, worker starting)" } else { "" }
+            if want && !live {
+                "  (active session, worker starting)"
+            } else {
+                ""
+            }
         );
     }
     Ok(())

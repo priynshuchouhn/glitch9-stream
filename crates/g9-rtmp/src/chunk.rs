@@ -62,7 +62,11 @@ impl ChunkWriter {
         // --- First chunk: type-0 (fmt=0) basic header + message header ---
         write_basic_header(&mut out, 0, csid);
         // message header (type 0): timestamp(3) length(3) type(1) streamid(4 LE)
-        let ts = if timestamp >= 0x00FF_FFFF { 0x00FF_FFFF } else { timestamp };
+        let ts = if timestamp >= 0x00FF_FFFF {
+            0x00FF_FFFF
+        } else {
+            timestamp
+        };
         out.put_u8((ts >> 16) as u8);
         out.put_u8((ts >> 8) as u8);
         out.put_u8(ts as u8);
