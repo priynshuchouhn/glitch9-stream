@@ -17,7 +17,7 @@ use g9_core::{Error, Result};
 use std::ptr;
 
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_WRITE,
+    ID3D11Device, ID3D11Texture2D, D3D11_BIND_DECODER, D3D11_CPU_ACCESS_WRITE,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
@@ -217,7 +217,11 @@ impl Vp8Decoder {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            // D3D11 video-processor input views require a video/decoder-bindable
+            // NV12 surface. A shader-resource-only NV12 texture can be created,
+            // but CreateVideoProcessorInputView rejects it with E_INVALIDARG on
+            // the NVIDIA driver used by the broadcast VM.
+            BindFlags: D3D11_BIND_DECODER.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
