@@ -641,27 +641,24 @@ fn video_loop(
     let ctx = D3DContext::new(None)?; // prefers NVIDIA adapter
     let mut capturer = Capturer::new(&ctx, cfg.display_index)?;
     let mut converter = Nv12Converter::new_with_ctx(&ctx, cfg.width, cfg.height)?;
-    // Facecam compositor (optional): decodes the camera H.264 and blends it over
-    // the game texture before NV12 conversion. Built lazily so a facecam that
-    // fails to initialize never breaks the game-only broadcast.
-    let mut compositor: Option<FacecamCompositor> = match &facecam {
-        Some(_) => match FacecamCompositor::new(
-            &ctx,
-            cfg.width,
-            cfg.height,
-            &facecam_position,
-            &facecam_shape,
-        ) {
-            Ok(c) => {
-                tracing::info!("facecam compositor ready; will composite camera over game");
-                Some(c)
-            }
-            Err(e) => {
-                tracing::warn!("facecam compositor unavailable: {e}; broadcasting game only");
-                None
-            }
-        },
-        None => None,
+    // Broadcast compositor: stamps every public/YouTube output with the Glitch9
+    // wordmark and also blends the optional facecam before NV12 conversion.
+    let mut compositor: Option<FacecamCompositor> = match FacecamCompositor::new(
+        &ctx,
+        cfg.width,
+        cfg.height,
+        &facecam_position,
+        &facecam_shape,
+        facecam.is_some(),
+    ) {
+        Ok(c) => {
+            tracing::info!("broadcast compositor ready; wordmark enabled");
+            Some(c)
+        }
+        Err(e) => {
+            tracing::warn!("broadcast compositor unavailable: {e}; broadcasting game only");
+            None
+        }
     };
     // Count facecam frames pulled by the video thread, for first-frames diagnostics.
     let mut facecam_takes: u64 = 0;
@@ -785,12 +782,10 @@ fn video_loop(
             }
         }
 
-        // 1b) Composite the facecam over the game texture (GPU) when present. The
-        // compositor pulls the newest decoded camera frame and blends it into a
-        // corner of `frame`; on any error it leaves the game frame untouched.
+        // 1b) Stamp the wordmark and composite the optional facecam on the GPU.
         let mut composited_frame = None;
-        if let (Some(comp), Some(fc)) = (compositor.as_mut(), facecam.as_ref()) {
-            if let Some((codec, au)) = fc.take_video() {
+        if let Some(comp) = compositor.as_mut() {
+            if let Some((codec, au)) = facecam.as_ref().and_then(|fc| fc.take_video()) {
                 facecam_takes += 1;
                 if facecam_takes <= 5 {
                     tracing::info!(
@@ -809,7 +804,7 @@ fn video_loop(
                 Err(e) => {
                     composite_errors += 1;
                     if composite_errors <= 5 || composite_errors % 300 == 0 {
-                        tracing::warn!("facecam composite error #{composite_errors}: {e}");
+                        tracing::warn!("broadcast composite error #{composite_errors}: {e}");
                     }
                 }
             }

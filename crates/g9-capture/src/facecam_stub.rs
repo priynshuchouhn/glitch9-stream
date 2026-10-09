@@ -22,6 +22,7 @@ impl FacecamCompositor {
         _h: u32,
         _position: &str,
         _shape: &str,
+        _has_facecam: bool,
     ) -> Result<Self> {
         Err(Error::capture("facecam compositor is Windows-only"))
     }

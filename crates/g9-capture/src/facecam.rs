@@ -1,13 +1,12 @@
-//! Windows facecam compositor: decodes the player's camera H.264 (received over
-//! WHEP from the SFU) and blends it into a corner of the captured game texture on
-//! the GPU, before NV12 conversion — so one encode carries game + facecam.
+//! Windows broadcast compositor: adds the Glitch9 wordmark to every broadcast and,
+//! when configured, decodes the player's camera and blends it into the game frame.
 //!
 //! [PENDING-HW] Compiles on `x86_64-pc-windows-msvc`; runs on a GPU. Decode uses the
 //! Media Foundation H.264 decoder MFT producing NV12 samples; the composite uses the
 //! same D3D11 Video Processor family as the NV12 converter so the camera (NV12) is
 //! blended into the BGRA game texture entirely on the GPU (no CPU pixel readback).
 //!
-//! Overlay placement: bottom-right corner, ~22% of the game width, 16:9. The game
+//! Facecam placement: bottom-right corner, ~22% of the game width, 16:9. The game
 //! texture is a render target (DXGI duplication textures are not), so we blend into
 //! a transient BGRA render-target copy only when a camera frame is present; when no
 //! camera frame has arrived yet the game frame passes through untouched.
@@ -47,6 +46,10 @@ pub enum FacecamCodec {
 const OVERLAY_WIDTH_FRACTION: f32 = 0.22;
 /// Margin from the edges, as a fraction of the game width.
 const OVERLAY_MARGIN_FRACTION: f32 = 0.02;
+/// Width of the unobtrusive stream wordmark relative to the output frame.
+const WORDMARK_WIDTH_FRACTION: f32 = 0.105;
+const WORDMARK_PIXEL_SCALE: usize = 3;
+const WORDMARK_TEXT: &str = "GLITCH9";
 
 pub struct FacecamCompositor {
     device: ID3D11Device,
@@ -69,6 +72,10 @@ pub struct FacecamCompositor {
     /// Reusable BGRA render target containing game + facecam. Desktop duplication
     /// textures are input-only and must never be used as a VP output surface.
     composite_texture: ID3D11Texture2D,
+    wordmark_texture: ID3D11Texture2D,
+    wordmark_w: u32,
+    wordmark_h: u32,
+    wordmark_left: bool,
     position: FacecamPosition,
     shape: FacecamShape,
 }
@@ -117,6 +124,7 @@ impl FacecamCompositor {
         height: u32,
         position: &str,
         shape: &str,
+        has_facecam: bool,
     ) -> Result<Self> {
         unsafe {
             let device = ctx.device().clone();
@@ -173,6 +181,37 @@ impl FacecamCompositor {
             let composite_texture = composite_texture
                 .ok_or_else(|| Error::capture("null facecam composite texture"))?;
 
+            let (wordmark_pixels, wordmark_w, wordmark_h) = build_wordmark();
+            let wordmark_desc = D3D11_TEXTURE2D_DESC {
+                Width: wordmark_w,
+                Height: wordmark_h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: 0,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut wordmark_texture = None;
+            device
+                .CreateTexture2D(&wordmark_desc, None, Some(&mut wordmark_texture))
+                .map_err(|e| Error::capture(format!("wordmark texture: {e}")))?;
+            let wordmark_texture =
+                wordmark_texture.ok_or_else(|| Error::capture("null wordmark texture"))?;
+            context.UpdateSubresource(
+                &wordmark_texture,
+                0,
+                None,
+                wordmark_pixels.as_ptr().cast(),
+                wordmark_w * 4,
+                0,
+            );
+
             Ok(Self {
                 device: device.clone(),
                 video_device,
@@ -188,6 +227,13 @@ impl FacecamCompositor {
                 cam_w: 0,
                 cam_h: 0,
                 composite_texture,
+                wordmark_texture,
+                wordmark_w,
+                wordmark_h,
+                // Keep the brand clear of a top-right camera; otherwise use the
+                // conventional top-right broadcast-watermark position.
+                wordmark_left: has_facecam
+                    && matches!(FacecamPosition::parse(position), FacecamPosition::TopRight),
                 position: FacecamPosition::parse(position),
                 shape: FacecamShape::parse(shape),
             })
@@ -238,10 +284,7 @@ impl FacecamCompositor {
     /// desktop-duplication textures cannot be VP output surfaces, so the caller
     /// must use the returned frame for conversion/encoding.
     pub fn composite(&mut self, game: &GpuTextureFrame) -> Result<Option<GpuTextureFrame>> {
-        let cam = match self.cam_nv12.as_ref() {
-            Some(c) => c.clone(),
-            None => return Ok(None),
-        };
+        let cam = self.cam_nv12.clone();
         let game_tex = game
             .texture()
             .ok_or_else(|| Error::capture("game frame has no texture"))?;
@@ -279,18 +322,6 @@ impl FacecamCompositor {
                 )
                 .map_err(|e| Error::capture(format!("VP game input view: {e}")))?;
             let game_view = game_view.ok_or_else(|| Error::capture("null VP game input view"))?;
-
-            // Input view 1: decoded camera NV12 texture.
-            let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
-            self.video_device
-                .CreateVideoProcessorInputView(
-                    &cam,
-                    &self.enumerator,
-                    &in_desc,
-                    Some(&mut input_view),
-                )
-                .map_err(|e| Error::capture(format!("VP input view: {e}")))?;
-            let input_view = input_view.ok_or_else(|| Error::capture("null VP input view"))?;
 
             // Destination rectangle in the configured corner and aspect shape.
             let margin = (self.width as f32 * OVERLAY_MARGIN_FRACTION) as i32;
@@ -345,33 +376,104 @@ impl FacecamCompositor {
                 true,
                 Some(&full),
             );
-            self.video_context.VideoProcessorSetStreamDestRect(
-                &self.processor,
-                1,
-                true,
-                Some(&dest),
-            );
-            self.video_context.VideoProcessorSetStreamSourceRect(
-                &self.processor,
-                1,
-                true,
-                Some(&source),
-            );
-            self.video_context
-                .VideoProcessorSetStreamAlpha(&self.processor, 1, true, 1.0);
+            let mut streams = vec![D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: true.into(),
+                pInputSurface: std::mem::ManuallyDrop::new(Some(game_view)),
+                ..Default::default()
+            }];
 
-            let streams = [
-                D3D11_VIDEO_PROCESSOR_STREAM {
-                    Enable: true.into(),
-                    pInputSurface: std::mem::ManuallyDrop::new(Some(game_view)),
-                    ..Default::default()
-                },
-                D3D11_VIDEO_PROCESSOR_STREAM {
+            if let Some(cam) = cam {
+                let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
+                self.video_device
+                    .CreateVideoProcessorInputView(
+                        &cam,
+                        &self.enumerator,
+                        &in_desc,
+                        Some(&mut input_view),
+                    )
+                    .map_err(|e| Error::capture(format!("VP camera input view: {e}")))?;
+                let input_view =
+                    input_view.ok_or_else(|| Error::capture("null VP camera input view"))?;
+                let stream_index = streams.len() as u32;
+                self.video_context.VideoProcessorSetStreamDestRect(
+                    &self.processor,
+                    stream_index,
+                    true,
+                    Some(&dest),
+                );
+                self.video_context.VideoProcessorSetStreamSourceRect(
+                    &self.processor,
+                    stream_index,
+                    true,
+                    Some(&source),
+                );
+                self.video_context.VideoProcessorSetStreamAlpha(
+                    &self.processor,
+                    stream_index,
+                    true,
+                    1.0,
+                );
+                streams.push(D3D11_VIDEO_PROCESSOR_STREAM {
                     Enable: true.into(),
                     pInputSurface: std::mem::ManuallyDrop::new(Some(input_view)),
                     ..Default::default()
-                },
-            ];
+                });
+            }
+
+            let mut wordmark_view = None;
+            self.video_device
+                .CreateVideoProcessorInputView(
+                    &self.wordmark_texture,
+                    &self.enumerator,
+                    &in_desc,
+                    Some(&mut wordmark_view),
+                )
+                .map_err(|e| Error::capture(format!("VP wordmark input view: {e}")))?;
+            let wordmark_view =
+                wordmark_view.ok_or_else(|| Error::capture("null VP wordmark input view"))?;
+            let logo_index = streams.len() as u32;
+            let logo_w = (self.width as f32 * WORDMARK_WIDTH_FRACTION) as i32;
+            let logo_h = (logo_w as f32 * self.wordmark_h as f32 / self.wordmark_w as f32) as i32;
+            let logo_left = if self.wordmark_left {
+                margin
+            } else {
+                self.width as i32 - margin - logo_w
+            };
+            let logo_dest = RECT {
+                left: logo_left,
+                top: margin,
+                right: logo_left + logo_w,
+                bottom: margin + logo_h,
+            };
+            let logo_source = RECT {
+                left: 0,
+                top: 0,
+                right: self.wordmark_w as i32,
+                bottom: self.wordmark_h as i32,
+            };
+            self.video_context.VideoProcessorSetStreamDestRect(
+                &self.processor,
+                logo_index,
+                true,
+                Some(&logo_dest),
+            );
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                logo_index,
+                true,
+                Some(&logo_source),
+            );
+            self.video_context.VideoProcessorSetStreamAlpha(
+                &self.processor,
+                logo_index,
+                true,
+                0.92,
+            );
+            streams.push(D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: true.into(),
+                pInputSurface: std::mem::ManuallyDrop::new(Some(wordmark_view)),
+                ..Default::default()
+            });
             self.video_context
                 .VideoProcessorBlt(&self.processor, &output_view, 0, &streams)
                 .map_err(|e| Error::capture(format!("VideoProcessorBlt: {e}")))?;
@@ -382,4 +484,64 @@ impl FacecamCompositor {
             self.height,
         )))
     }
+}
+
+/// Build the stream version of the site's wordmark: condensed uppercase GLITCH
+/// in soft white and the 9 in brand green (#45f882). The GPU scales this crisp
+/// bitmap to the output resolution. Transparent pixels keep it a wordmark rather
+/// than a badge.
+fn build_wordmark() -> (Vec<u8>, u32, u32) {
+    const GLYPHS: [[u8; 7]; 7] = [
+        [
+            0b01110, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+        ], // G
+        [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ], // L
+        [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ], // I
+        [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ], // T
+        [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ], // C
+        [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ], // H
+        [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ], // 9
+    ];
+    debug_assert_eq!(WORDMARK_TEXT.len(), GLYPHS.len());
+    let pad = 2 * WORDMARK_PIXEL_SCALE;
+    let width = pad * 2 + (GLYPHS.len() * 6 - 1) * WORDMARK_PIXEL_SCALE;
+    let height = pad * 2 + 7 * WORDMARK_PIXEL_SCALE;
+    let mut pixels = vec![0u8; width * height * 4];
+    for (glyph_index, glyph) in GLYPHS.iter().enumerate() {
+        // D3D's texture is BGRA. Match the web wordmark: GLITCH uses the site's
+        // foreground white and only the final 9 carries the neon brand accent.
+        let color = if glyph_index + 1 == GLYPHS.len() {
+            [0x82, 0xf8, 0x45, 0xff] // #45f882
+        } else {
+            [0xed, 0xed, 0xed, 0xff] // #ededed
+        };
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..5 {
+                if bits & (1 << (4 - col)) == 0 {
+                    continue;
+                }
+                for sy in 0..WORDMARK_PIXEL_SCALE {
+                    for sx in 0..WORDMARK_PIXEL_SCALE {
+                        let x = pad + (glyph_index * 6 + col) * WORDMARK_PIXEL_SCALE + sx;
+                        let y = pad + row * WORDMARK_PIXEL_SCALE + sy;
+                        let offset = (y * width + x) * 4;
+                        pixels[offset..offset + 4].copy_from_slice(&color);
+                    }
+                }
+            }
+        }
+    }
+    (pixels, width as u32, height as u32)
 }
