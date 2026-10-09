@@ -48,8 +48,9 @@ const OVERLAY_WIDTH_FRACTION: f32 = 0.22;
 const OVERLAY_MARGIN_FRACTION: f32 = 0.02;
 /// Width of the unobtrusive stream wordmark relative to the output frame.
 const WORDMARK_WIDTH_FRACTION: f32 = 0.105;
-const WORDMARK_PIXEL_SCALE: usize = 3;
-const WORDMARK_TEXT: &str = "GLITCH9";
+const WORDMARK_WIDTH: u32 = 306;
+const WORDMARK_HEIGHT: u32 = 96;
+const WORDMARK_BGRA: &[u8] = include_bytes!("../assets/glitch9-wordmark.bgra");
 
 pub struct FacecamCompositor {
     device: ID3D11Device,
@@ -181,10 +182,9 @@ impl FacecamCompositor {
             let composite_texture = composite_texture
                 .ok_or_else(|| Error::capture("null facecam composite texture"))?;
 
-            let (wordmark_pixels, wordmark_w, wordmark_h) = build_wordmark();
             let wordmark_desc = D3D11_TEXTURE2D_DESC {
-                Width: wordmark_w,
-                Height: wordmark_h,
+                Width: WORDMARK_WIDTH,
+                Height: WORDMARK_HEIGHT,
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -207,8 +207,8 @@ impl FacecamCompositor {
                 &wordmark_texture,
                 0,
                 None,
-                wordmark_pixels.as_ptr().cast(),
-                wordmark_w * 4,
+                WORDMARK_BGRA.as_ptr().cast(),
+                WORDMARK_WIDTH * 4,
                 0,
             );
 
@@ -228,8 +228,8 @@ impl FacecamCompositor {
                 cam_h: 0,
                 composite_texture,
                 wordmark_texture,
-                wordmark_w,
-                wordmark_h,
+                wordmark_w: WORDMARK_WIDTH,
+                wordmark_h: WORDMARK_HEIGHT,
                 // Keep the brand clear of a top-right camera; otherwise use the
                 // conventional top-right broadcast-watermark position.
                 wordmark_left: has_facecam
@@ -484,64 +484,4 @@ impl FacecamCompositor {
             self.height,
         )))
     }
-}
-
-/// Build the stream version of the site's wordmark: condensed uppercase GLITCH
-/// in soft white and the 9 in brand green (#45f882). The GPU scales this crisp
-/// bitmap to the output resolution. Transparent pixels keep it a wordmark rather
-/// than a badge.
-fn build_wordmark() -> (Vec<u8>, u32, u32) {
-    const GLYPHS: [[u8; 7]; 7] = [
-        [
-            0b01110, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
-        ], // G
-        [
-            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
-        ], // L
-        [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
-        ], // I
-        [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ], // T
-        [
-            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
-        ], // C
-        [
-            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ], // H
-        [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
-        ], // 9
-    ];
-    debug_assert_eq!(WORDMARK_TEXT.len(), GLYPHS.len());
-    let pad = 2 * WORDMARK_PIXEL_SCALE;
-    let width = pad * 2 + (GLYPHS.len() * 6 - 1) * WORDMARK_PIXEL_SCALE;
-    let height = pad * 2 + 7 * WORDMARK_PIXEL_SCALE;
-    let mut pixels = vec![0u8; width * height * 4];
-    for (glyph_index, glyph) in GLYPHS.iter().enumerate() {
-        // D3D's texture is BGRA. Match the web wordmark: GLITCH uses the site's
-        // foreground white and only the final 9 carries the neon brand accent.
-        let color = if glyph_index + 1 == GLYPHS.len() {
-            [0x82, 0xf8, 0x45, 0xff] // #45f882
-        } else {
-            [0xed, 0xed, 0xed, 0xff] // #ededed
-        };
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..5 {
-                if bits & (1 << (4 - col)) == 0 {
-                    continue;
-                }
-                for sy in 0..WORDMARK_PIXEL_SCALE {
-                    for sx in 0..WORDMARK_PIXEL_SCALE {
-                        let x = pad + (glyph_index * 6 + col) * WORDMARK_PIXEL_SCALE + sx;
-                        let y = pad + row * WORDMARK_PIXEL_SCALE + sy;
-                        let offset = (y * width + x) * 4;
-                        pixels[offset..offset + 4].copy_from_slice(&color);
-                    }
-                }
-            }
-        }
-    }
-    (pixels, width as u32, height as u32)
 }
