@@ -420,9 +420,10 @@ async fn pump_vp8(
     // does NOT reassemble a frame that spans multiple RTP packets. libvpx needs a
     // COMPLETE coded frame, so we accumulate depacketized payloads until the RTP
     // marker bit (last packet of a frame), then emit the assembled frame.
-    let mut depacketizer = Vp8Packet::default();
     let mut assembler = Vp8FrameAssembler::default();
     let mut last_loss_pli: Option<std::time::Instant> = None;
+    let mut waiting_for_keyframe = true;
+    let mut frame_count: u64 = 0;
     while !closed.load(Ordering::SeqCst) {
         let (packet, _) = match track.read_rtp().await {
             Ok(v) => v,
@@ -431,10 +432,16 @@ async fn pump_vp8(
         if packet.payload.is_empty() {
             continue;
         }
+        // Vp8Packet keeps parsed optional-header fields on the struct. Reusing it
+        // can leak I/L/T/K flags from a previous RTP packet whose descriptor had
+        // X=1 into a later packet with X=0, stripping bytes from the VP8 payload.
+        // Parse every packet with a fresh descriptor.
+        let mut depacketizer = Vp8Packet::default();
         let part = match depacketizer.depacketize(&packet.payload) {
             Ok(part) => part,
             Err(_) => {
                 assembler.damage_current_frame();
+                waiting_for_keyframe = true;
                 if last_loss_pli
                     .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(750))
                 {
@@ -457,14 +464,36 @@ async fn pump_vp8(
             && last_loss_pli
                 .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(750))
         {
+            waiting_for_keyframe = true;
             last_loss_pli = Some(std::time::Instant::now());
             request_keyframe(&pc, ssrc, "RTP loss").await;
+        } else if loss_detected {
+            waiting_for_keyframe = true;
         }
 
         // Only complete, gap-free frames reach libvpx. Keeping the last decoded
         // texture for a fraction of a second is preferable to poisoning VP8's
         // reference chain with an incomplete frame.
         if let Some(frame) = frame {
+            frame_count += 1;
+            let keyframe = vp8_is_keyframe(&frame);
+            if waiting_for_keyframe {
+                if !keyframe {
+                    if last_loss_pli
+                        .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(750))
+                    {
+                        last_loss_pli = Some(std::time::Instant::now());
+                        request_keyframe(&pc, ssrc, "waiting for initial VP8 keyframe").await;
+                    }
+                    continue;
+                }
+                waiting_for_keyframe = false;
+                tracing::info!(
+                    target: "g9::whep-sub",
+                    "facecam vp8 pump: received recovery keyframe ({} bytes, frame #{frame_count})",
+                    frame.len()
+                );
+            }
             if tx
                 .send(FacecamSample::Video(FacecamVideoCodec::Vp8, frame))
                 .await
@@ -474,6 +503,17 @@ async fn pump_vp8(
             }
         }
     }
+}
+
+/// A VP8 keyframe has frame-type bit 0 cleared and carries the three-byte start
+/// code 9d 01 2a. Checking both avoids treating truncated/corrupt frames as a
+/// decoder reset point.
+fn vp8_is_keyframe(frame: &[u8]) -> bool {
+    frame.len() >= 10
+        && frame[0] & 0x01 == 0
+        && frame[3] == 0x9d
+        && frame[4] == 0x01
+        && frame[5] == 0x2a
 }
 
 #[derive(Default)]
@@ -725,7 +765,7 @@ fn parse_http_url(url: &str) -> anyhow::Result<(String, u16, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::Vp8FrameAssembler;
+    use super::{vp8_is_keyframe, Vp8FrameAssembler};
 
     #[test]
     fn vp8_assembler_emits_complete_multi_packet_frame() {
@@ -765,5 +805,17 @@ mod tests {
         let (frame, loss) = assembler.push(0, 600, true, false, b"b");
         assert!(!loss);
         assert_eq!(frame.as_deref(), Some(b"ab".as_slice()));
+    }
+
+    #[test]
+    fn vp8_keyframe_detection_requires_header_and_start_code() {
+        let mut keyframe = [0u8; 10];
+        keyframe[3..6].copy_from_slice(&[0x9d, 0x01, 0x2a]);
+        assert!(vp8_is_keyframe(&keyframe));
+
+        let mut delta = keyframe;
+        delta[0] = 1;
+        assert!(!vp8_is_keyframe(&delta));
+        assert!(!vp8_is_keyframe(&[0u8; 6]));
     }
 }

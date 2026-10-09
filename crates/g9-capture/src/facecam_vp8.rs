@@ -234,8 +234,6 @@ impl Vp8Decoder {
         self.texture = texture;
         self.tex_w = w;
         self.tex_h = h;
-        // Buffer must be resized for the new dimensions on the next decode.
-        self.nv12.clear();
         let _ = (D3D11_CPU_ACCESS_WRITE, D3D11_SUBRESOURCE_DATA::default());
         Ok(())
     }
