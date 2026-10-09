@@ -226,6 +226,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 match g9_webrtc::WhepSubscriber::connect(&whep_url).await {
                     Ok((sub, mut rx)) => {
                         tracing::info!("facecam: subscribed to {}", whep_url);
+                        // The replacement publisher can intentionally be audio-only.
+                        // Clear any camera frame retained from its predecessor.
+                        state.clear_video();
                         backoff_ms = RETRY_MIN_MS; // reset after a successful connect
                         while let Some(sample) = rx.recv().await {
                             if SHUTDOWN.load(Ordering::SeqCst) {
@@ -247,6 +250,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                             }
                         }
                         sub.close().await;
+                        state.clear_video();
                         // Channel closed: the facecam stream ended. Loop to re-subscribe
                         // in case the player brings their camera back.
                         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -663,6 +667,10 @@ fn video_loop(
     // Count facecam frames pulled by the video thread, for first-frames diagnostics.
     let mut facecam_takes: u64 = 0;
     let mut composite_errors: u64 = 0;
+    let mut facecam_video_generation = facecam
+        .as_ref()
+        .map(crate::facecam::FacecamState::video_generation)
+        .unwrap_or(0);
     // DXGI reports only desktop changes. When the game is static/minimized, reuse
     // a safe GPU copy so incoming camera frames still advance on the broadcast.
     let mut frame_cache = facecam.as_ref().map(|_| GpuFrameCache::new());
@@ -785,6 +793,14 @@ fn video_loop(
         // 1b) Stamp the wordmark and composite the optional facecam on the GPU.
         let mut composited_frame = None;
         if let Some(comp) = compositor.as_mut() {
+            if let Some(fc) = facecam.as_ref() {
+                let generation = fc.video_generation();
+                if generation != facecam_video_generation {
+                    facecam_video_generation = generation;
+                    comp.clear_camera();
+                    tracing::info!("facecam video cleared; continuing without camera overlay");
+                }
+            }
             if let Some((codec, au)) = facecam.as_ref().and_then(|fc| fc.take_video()) {
                 facecam_takes += 1;
                 if facecam_takes <= 5 {

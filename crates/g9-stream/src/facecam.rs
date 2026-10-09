@@ -10,6 +10,7 @@ use bytes::Bytes;
 use g9_capture::FacecamCodec;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Bound on the queued mic packets so a stalled consumer can't grow memory without
@@ -30,6 +31,8 @@ pub struct FacecamState {
 struct Inner {
     /// Encoded camera access units waiting to be decoded, in arrival order.
     video_queue: Mutex<VecDeque<(FacecamCodec, Bytes)>>,
+    /// Changes whenever a publication ends or restarts.
+    video_generation: AtomicU64,
     /// Queued Opus mic packets awaiting mix into the broadcast audio.
     audio_queue: Mutex<VecDeque<Bytes>>,
 }
@@ -39,6 +42,7 @@ impl FacecamState {
         Self {
             inner: Arc::new(Inner {
                 video_queue: Mutex::new(VecDeque::new()),
+                video_generation: AtomicU64::new(0),
                 audio_queue: Mutex::new(VecDeque::new()),
             }),
         }
@@ -58,6 +62,17 @@ impl FacecamState {
     /// preserved.
     pub fn take_video(&self) -> Option<(FacecamCodec, Bytes)> {
         self.inner.video_queue.lock().pop_front()
+    }
+
+    /// Clear camera video without touching microphone packets. The generation
+    /// change tells the GPU compositor to remove its last decoded texture.
+    pub fn clear_video(&self) {
+        self.inner.video_queue.lock().clear();
+        self.inner.video_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn video_generation(&self) -> u64 {
+        self.inner.video_generation.load(Ordering::SeqCst)
     }
 
     /// Queue a mic Opus packet, dropping the oldest when the bound is reached.
@@ -92,8 +107,23 @@ mod tests {
         state.push_video(FacecamCodec::H264, Bytes::from_static(b"keyframe"));
         state.push_video(FacecamCodec::H264, Bytes::from_static(b"delta"));
 
-        assert_eq!(state.take_video().unwrap().1, Bytes::from_static(b"keyframe"));
+        assert_eq!(
+            state.take_video().unwrap().1,
+            Bytes::from_static(b"keyframe")
+        );
         assert_eq!(state.take_video().unwrap().1, Bytes::from_static(b"delta"));
         assert!(state.take_video().is_none());
+    }
+
+    #[test]
+    fn clearing_video_drops_frames_and_advances_generation() {
+        let state = FacecamState::new();
+        state.push_video(FacecamCodec::Vp8, Bytes::from_static(b"frame"));
+        let generation = state.video_generation();
+
+        state.clear_video();
+
+        assert!(state.take_video().is_none());
+        assert!(state.video_generation() > generation);
     }
 }

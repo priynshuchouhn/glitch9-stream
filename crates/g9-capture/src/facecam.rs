@@ -76,7 +76,7 @@ pub struct FacecamCompositor {
     wordmark_texture: ID3D11Texture2D,
     wordmark_w: u32,
     wordmark_h: u32,
-    wordmark_left: bool,
+    avoid_top_right: bool,
     position: FacecamPosition,
     shape: FacecamShape,
 }
@@ -232,7 +232,7 @@ impl FacecamCompositor {
                 wordmark_h: WORDMARK_HEIGHT,
                 // Keep the brand clear of a top-right camera; otherwise use the
                 // conventional top-right broadcast-watermark position.
-                wordmark_left: has_facecam
+                avoid_top_right: has_facecam
                     && matches!(FacecamPosition::parse(position), FacecamPosition::TopRight),
                 position: FacecamPosition::parse(position),
                 shape: FacecamShape::parse(shape),
@@ -280,11 +280,23 @@ impl FacecamCompositor {
         Ok(())
     }
 
+    /// Remove the old publication's decoded frame and codec state. This prevents
+    /// a frozen facecam when the user switches the camera off and lets a later
+    /// VP8/H.264 publication initialize cleanly from a new keyframe.
+    pub fn clear_camera(&mut self) {
+        self.cam_nv12 = None;
+        self.cam_w = 0;
+        self.cam_h = 0;
+        self.h264 = None;
+        self.vp8 = None;
+    }
+
     /// Blend game + latest camera into a separate render-target texture. DXGI
     /// desktop-duplication textures cannot be VP output surfaces, so the caller
     /// must use the returned frame for conversion/encoding.
     pub fn composite(&mut self, game: &GpuTextureFrame) -> Result<Option<GpuTextureFrame>> {
         let cam = self.cam_nv12.clone();
+        let camera_visible = cam.is_some();
         let game_tex = game
             .texture()
             .ok_or_else(|| Error::capture("game frame has no texture"))?;
@@ -434,7 +446,7 @@ impl FacecamCompositor {
             let logo_index = streams.len() as u32;
             let logo_w = (self.width as f32 * WORDMARK_WIDTH_FRACTION) as i32;
             let logo_h = (logo_w as f32 * self.wordmark_h as f32 / self.wordmark_w as f32) as i32;
-            let logo_left = if self.wordmark_left {
+            let logo_left = if self.avoid_top_right && camera_visible {
                 margin
             } else {
                 self.width as i32 - margin - logo_w

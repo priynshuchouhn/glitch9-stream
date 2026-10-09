@@ -29,6 +29,7 @@ impl FacecamCompositor {
     pub fn update_camera(&mut self, _codec: FacecamCodec, _data: &[u8]) -> Result<()> {
         Err(Error::capture("facecam compositor is Windows-only"))
     }
+    pub fn clear_camera(&mut self) {}
     pub fn composite(&mut self, _game: &GpuTextureFrame) -> Result<Option<GpuTextureFrame>> {
         Err(Error::capture("facecam compositor is Windows-only"))
     }
