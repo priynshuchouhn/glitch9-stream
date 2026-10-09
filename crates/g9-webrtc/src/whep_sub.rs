@@ -112,12 +112,13 @@ impl WhepSubscriber {
                     // IDR with SPS/PPS. We subscribe mid-stream, so without this the
                     // decoder only ever sees delta slices (no parameter sets) and can
                     // never initialize. Repeat until the pump sees a keyframe.
-                    spawn_keyframe_requester(pc_weak, track.ssrc(), closed.clone());
+                    spawn_keyframe_requester(pc_weak.clone(), track.ssrc(), closed.clone());
                 }
                 tokio::spawn(async move {
                     if kind == RTPCodecType::Video {
                         if mime.contains("vp8") {
-                            pump_vp8(track, tx, closed).await;
+                            let ssrc = track.ssrc();
+                            pump_vp8(track, tx, closed, pc_weak, ssrc).await;
                         } else {
                             // Default to H.264 for video/H264 (and anything else we
                             // don't explicitly branch), matching prior behavior.
@@ -409,6 +410,8 @@ async fn pump_vp8(
     track: Arc<TrackRemote>,
     tx: mpsc::Sender<FacecamSample>,
     closed: Arc<AtomicBool>,
+    pc: std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
+    ssrc: u32,
 ) {
     use webrtc::rtp::codecs::vp8::Vp8Packet;
     use webrtc::rtp::packetizer::Depacketizer;
@@ -418,7 +421,8 @@ async fn pump_vp8(
     // COMPLETE coded frame, so we accumulate depacketized payloads until the RTP
     // marker bit (last packet of a frame), then emit the assembled frame.
     let mut depacketizer = Vp8Packet::default();
-    let mut frame_buf: Vec<u8> = Vec::new();
+    let mut assembler = Vp8FrameAssembler::default();
+    let mut last_loss_pli: Option<std::time::Instant> = None;
     while !closed.load(Ordering::SeqCst) {
         let (packet, _) = match track.read_rtp().await {
             Ok(v) => v,
@@ -427,18 +431,40 @@ async fn pump_vp8(
         if packet.payload.is_empty() {
             continue;
         }
-        match depacketizer.depacketize(&packet.payload) {
-            Ok(part) => frame_buf.extend_from_slice(&part),
+        let part = match depacketizer.depacketize(&packet.payload) {
+            Ok(part) => part,
             Err(_) => {
-                // Corrupt packet: drop the partial frame to avoid feeding libvpx a
-                // misassembled bitstream; the next keyframe recovers decoding.
-                frame_buf.clear();
+                assembler.damage_current_frame();
+                if last_loss_pli
+                    .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(750))
+                {
+                    last_loss_pli = Some(std::time::Instant::now());
+                    request_keyframe(&pc, ssrc, "invalid VP8 RTP payload").await;
+                }
                 continue;
             }
+        };
+        let starts_frame = depacketizer.s == 1 && depacketizer.pid == 0;
+        let (frame, loss_detected) = assembler.push(
+            packet.header.sequence_number,
+            packet.header.timestamp,
+            packet.header.marker,
+            starts_frame,
+            &part,
+        );
+
+        if loss_detected
+            && last_loss_pli
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(750))
+        {
+            last_loss_pli = Some(std::time::Instant::now());
+            request_keyframe(&pc, ssrc, "RTP loss").await;
         }
-        // Marker bit set => last packet of this frame; emit the complete frame.
-        if packet.header.marker && !frame_buf.is_empty() {
-            let frame = Bytes::from(std::mem::take(&mut frame_buf));
+
+        // Only complete, gap-free frames reach libvpx. Keeping the last decoded
+        // texture for a fraction of a second is preferable to poisoning VP8's
+        // reference chain with an incomplete frame.
+        if let Some(frame) = frame {
             if tx
                 .send(FacecamSample::Video(FacecamVideoCodec::Vp8, frame))
                 .await
@@ -447,6 +473,96 @@ async fn pump_vp8(
                 break;
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct Vp8FrameAssembler {
+    expected_sequence: Option<u16>,
+    timestamp: Option<u32>,
+    frame_buf: Vec<u8>,
+    damaged: bool,
+}
+
+impl Vp8FrameAssembler {
+    fn damage_current_frame(&mut self) {
+        self.damaged = true;
+        self.frame_buf.clear();
+    }
+
+    fn push(
+        &mut self,
+        sequence: u16,
+        timestamp: u32,
+        marker: bool,
+        starts_frame: bool,
+        payload: &[u8],
+    ) -> (Option<Bytes>, bool) {
+        let sequence_gap = self
+            .expected_sequence
+            .is_some_and(|expected| expected != sequence);
+        self.expected_sequence = Some(sequence.wrapping_add(1));
+
+        let timestamp_changed = self.timestamp.is_some_and(|current| current != timestamp);
+        let mut loss_detected = sequence_gap;
+        if timestamp_changed {
+            // A new timestamp before the old frame's marker means the old frame
+            // was incomplete. A genuine VP8 start packet can still begin cleanly.
+            loss_detected |= !self.frame_buf.is_empty() || self.damaged;
+            self.frame_buf.clear();
+            self.damaged = !starts_frame;
+        } else if starts_frame && !self.frame_buf.is_empty() {
+            // A second start inside one timestamp means assembly lost framing.
+            loss_detected = true;
+            self.frame_buf.clear();
+            self.damaged = false;
+        }
+        self.timestamp = Some(timestamp);
+
+        // A gap immediately before a valid new-frame start belongs to the prior
+        // frame; otherwise the current frame is missing a packet and must be dropped.
+        if sequence_gap && !starts_frame {
+            self.damage_current_frame();
+        }
+        if !self.damaged {
+            self.frame_buf.extend_from_slice(payload);
+        }
+
+        if !marker {
+            return (None, loss_detected);
+        }
+        let frame = if self.damaged || self.frame_buf.is_empty() {
+            None
+        } else {
+            Some(Bytes::from(std::mem::take(&mut self.frame_buf)))
+        };
+        self.frame_buf.clear();
+        self.timestamp = None;
+        self.damaged = false;
+        (frame, loss_detected)
+    }
+}
+
+async fn request_keyframe(
+    pc: &std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
+    ssrc: u32,
+    reason: &str,
+) {
+    use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    let Some(pc) = pc.upgrade() else { return };
+    let pli = PictureLossIndication {
+        sender_ssrc: 0,
+        media_ssrc: ssrc,
+    };
+    match pc.write_rtcp(&[Box::new(pli)]).await {
+        Ok(n) => tracing::info!(
+            target: "g9::whep-sub",
+            "facecam PLI sent after {reason} (ssrc={ssrc}, {n} bytes)"
+        ),
+        Err(e) => tracing::info!(
+            target: "g9::whep-sub",
+            "facecam PLI after {reason} failed: {e}"
+        ),
     }
 }
 
@@ -605,4 +721,49 @@ fn parse_http_url(url: &str) -> anyhow::Result<(String, u16, String)> {
         None => (authority.to_string(), 80u16),
     };
     Ok((host, port, path.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Vp8FrameAssembler;
+
+    #[test]
+    fn vp8_assembler_emits_complete_multi_packet_frame() {
+        let mut assembler = Vp8FrameAssembler::default();
+        assert_eq!(assembler.push(10, 100, false, true, b"abc"), (None, false));
+        let (frame, loss) = assembler.push(11, 100, true, false, b"def");
+        assert!(!loss);
+        assert_eq!(frame.as_deref(), Some(b"abcdef".as_slice()));
+    }
+
+    #[test]
+    fn vp8_assembler_drops_frame_with_sequence_gap() {
+        let mut assembler = Vp8FrameAssembler::default();
+        assembler.push(20, 200, false, true, b"first");
+        let (frame, loss) = assembler.push(22, 200, true, false, b"last");
+        assert!(loss);
+        assert!(frame.is_none());
+
+        let (recovered, loss) = assembler.push(23, 300, true, true, b"keyframe");
+        assert!(!loss);
+        assert_eq!(recovered.as_deref(), Some(b"keyframe".as_slice()));
+    }
+
+    #[test]
+    fn vp8_assembler_drops_unfinished_timestamp_and_recovers_at_new_start() {
+        let mut assembler = Vp8FrameAssembler::default();
+        assembler.push(30, 400, false, true, b"partial");
+        let (frame, loss) = assembler.push(31, 500, true, true, b"fresh");
+        assert!(loss);
+        assert_eq!(frame.as_deref(), Some(b"fresh".as_slice()));
+    }
+
+    #[test]
+    fn vp8_sequence_wraparound_is_contiguous() {
+        let mut assembler = Vp8FrameAssembler::default();
+        assembler.push(u16::MAX, 600, false, true, b"a");
+        let (frame, loss) = assembler.push(0, 600, true, false, b"b");
+        assert!(!loss);
+        assert_eq!(frame.as_deref(), Some(b"ab".as_slice()));
+    }
 }
