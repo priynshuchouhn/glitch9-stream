@@ -58,10 +58,12 @@ impl FacecamState {
         q.push_back((codec, au));
     }
 
-    /// Take the oldest queued camera access unit so inter-frame decode order is
-    /// preserved.
-    pub fn take_video(&self) -> Option<(FacecamCodec, Bytes)> {
-        self.inner.video_queue.lock().pop_front()
+    /// Drain every pending camera access unit in arrival order. Camera publishers
+    /// commonly run at 30 fps while the output loop can dip below that rate; only
+    /// consuming one AU per output frame creates an ever-growing decode delay and
+    /// eventually drops inter-frame dependencies when the queue reaches its cap.
+    pub fn drain_video(&self) -> Vec<(FacecamCodec, Bytes)> {
+        self.inner.video_queue.lock().drain(..).collect()
     }
 
     /// Clear camera video without touching microphone packets. The generation
@@ -102,17 +104,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn video_access_units_are_consumed_in_arrival_order() {
+    fn draining_video_preserves_decode_order() {
         let state = FacecamState::new();
-        state.push_video(FacecamCodec::H264, Bytes::from_static(b"keyframe"));
-        state.push_video(FacecamCodec::H264, Bytes::from_static(b"delta"));
+        state.push_video(FacecamCodec::Vp8, Bytes::from_static(b"keyframe"));
+        state.push_video(FacecamCodec::Vp8, Bytes::from_static(b"delta"));
 
-        assert_eq!(
-            state.take_video().unwrap().1,
-            Bytes::from_static(b"keyframe")
-        );
-        assert_eq!(state.take_video().unwrap().1, Bytes::from_static(b"delta"));
-        assert!(state.take_video().is_none());
+        let drained = state.drain_video();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].1, Bytes::from_static(b"keyframe"));
+        assert_eq!(drained[1].1, Bytes::from_static(b"delta"));
+        assert!(state.drain_video().is_empty());
     }
 
     #[test]
@@ -123,7 +124,7 @@ mod tests {
 
         state.clear_video();
 
-        assert!(state.take_video().is_none());
+        assert!(state.drain_video().is_empty());
         assert!(state.video_generation() > generation);
     }
 }

@@ -801,17 +801,22 @@ fn video_loop(
                     tracing::info!("facecam video cleared; continuing without camera overlay");
                 }
             }
-            if let Some((codec, au)) = facecam.as_ref().and_then(|fc| fc.take_video()) {
-                facecam_takes += 1;
-                if facecam_takes <= 5 {
-                    tracing::info!(
-                        "facecam video thread: took {codec:?} AU ({} bytes) #{facecam_takes}",
-                        au.len()
-                    );
-                }
-                if let Err(e) = comp.update_camera(codec, &au) {
-                    if facecam_takes <= 10 {
-                        tracing::info!("facecam update_camera error: {e}");
+            if let Some(fc) = facecam.as_ref() {
+                // Decode all pending AUs in order so a 30 fps camera cannot build
+                // an unbounded delay behind a 22-30 fps output loop. The decoder
+                // updates one reusable texture, so only the newest result is drawn.
+                for (codec, au) in fc.drain_video() {
+                    facecam_takes += 1;
+                    if facecam_takes <= 5 {
+                        tracing::info!(
+                            "facecam video thread: took {codec:?} AU ({} bytes) #{facecam_takes}",
+                            au.len()
+                        );
+                    }
+                    if let Err(e) = comp.update_camera(codec, &au) {
+                        if facecam_takes <= 10 {
+                            tracing::info!("facecam update_camera error: {e}");
+                        }
                     }
                 }
             }
