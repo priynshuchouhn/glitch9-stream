@@ -430,52 +430,78 @@ fn audio_loop(
         mic_decoder.is_some(),
     );
 
+    // WASAPI loopback delivers NO packets while nothing is rendering (game silent,
+    // loading, paused). The SFU drops a WHIP track that carries no RTP within its
+    // track-gather window, so a broadcast that starts during silence was published
+    // video-only for its whole life. Once loopback has been idle this long, emit
+    // digital silence covering exactly the idle time so the track is never empty.
+    const SILENCE_FILL_AFTER: Duration = Duration::from_millis(100);
+    let mut last_audio = std::time::Instant::now();
+    let mut silence_filled = false;
+
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
-        match capture.read()? {
-            Some(mut pcm) => {
-                // Put captured audio on the same stream timeline as video. AAC
-                // preserves this origin and advances it by encoded sample count.
-                pcm.pts = clock.now();
-                // Mix the player's microphone (facecam) into the system/game audio.
-                // Decode queued Opus voice packets to PCM and sum into `pcm` with a
-                // simple clamp. Both are interleaved f32; mic is 48 kHz/2ch, which
-                // matches the broadcast path (loopback is typically 48 kHz too).
-                if let (Some(dec), Some(fc)) = (mic_decoder.as_mut(), facecam.as_ref()) {
-                    for packet in fc.drain_audio() {
-                        if let Ok(mic_pcm) = dec.decode(&packet) {
-                            mic_packets_received += 1;
-                            mic_samples.extend(resample_stereo(&mic_pcm, 48_000, actual_rate));
-                            if mic_packets_received == 1 {
-                                tracing::info!(
-                                    "facecam microphone: receiving and mixing Opus audio"
-                                );
-                            }
-                        }
-                    }
-                    let mixed: Vec<f32> = (0..pcm.samples.len())
-                        .map(|_| mic_samples.pop_front().unwrap_or(0.0))
-                        .collect();
-                    mix_into(&mut pcm.samples, &mixed);
+        let mut pcm = match capture.read()? {
+            Some(pcm) => {
+                last_audio = std::time::Instant::now();
+                pcm
+            }
+            None => {
+                let gap = last_audio.elapsed();
+                if gap < SILENCE_FILL_AFTER {
+                    // No audio ready; brief sleep to avoid a busy spin.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
                 }
-                // Opus → WebRTC
-                if let (Some(enc), Some(t)) = (opus.as_mut(), webrtc_t.as_ref()) {
-                    for pkt in enc.encode(&pcm)? {
-                        t.send_audio(pkt);
-                    }
+                // Advance by the frames actually emitted so rounding never drifts.
+                let frames = (gap.as_secs_f64() * actual_rate as f64) as usize;
+                last_audio += Duration::from_secs_f64(frames as f64 / actual_rate as f64);
+                if !silence_filled {
+                    silence_filled = true;
+                    tracing::info!("loopback idle; filling silence to keep the audio track live");
                 }
-                // AAC → YouTube
-                if let (Some(enc), Some(t)) = (aac.as_mut(), youtube_t.as_ref()) {
-                    for pkt in enc.encode(&pcm)? {
-                        t.send_audio(pkt);
+                g9_audio::PcmChunk {
+                    samples: vec![0.0; frames * actual_channels as usize],
+                    sample_rate: actual_rate,
+                    channels: actual_channels,
+                    pts: Duration::ZERO,
+                }
+            }
+        };
+        // Put captured audio on the same stream timeline as video. AAC
+        // preserves this origin and advances it by encoded sample count.
+        pcm.pts = clock.now();
+        // Mix the player's microphone (facecam) into the system/game audio.
+        // Decode queued Opus voice packets to PCM and sum into `pcm` with a
+        // simple clamp. Both are interleaved f32; mic is 48 kHz/2ch, which
+        // matches the broadcast path (loopback is typically 48 kHz too).
+        if let (Some(dec), Some(fc)) = (mic_decoder.as_mut(), facecam.as_ref()) {
+            for packet in fc.drain_audio() {
+                if let Ok(mic_pcm) = dec.decode(&packet) {
+                    mic_packets_received += 1;
+                    mic_samples.extend(resample_stereo(&mic_pcm, 48_000, actual_rate));
+                    if mic_packets_received == 1 {
+                        tracing::info!("facecam microphone: receiving and mixing Opus audio");
                     }
                 }
             }
-            None => {
-                // No audio ready; brief sleep to avoid a busy spin.
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            let mixed: Vec<f32> = (0..pcm.samples.len())
+                .map(|_| mic_samples.pop_front().unwrap_or(0.0))
+                .collect();
+            mix_into(&mut pcm.samples, &mixed);
+        }
+        // Opus → WebRTC
+        if let (Some(enc), Some(t)) = (opus.as_mut(), webrtc_t.as_ref()) {
+            for pkt in enc.encode(&pcm)? {
+                t.send_audio(pkt);
+            }
+        }
+        // AAC → YouTube
+        if let (Some(enc), Some(t)) = (aac.as_mut(), youtube_t.as_ref()) {
+            for pkt in enc.encode(&pcm)? {
+                t.send_audio(pkt);
             }
         }
     }
